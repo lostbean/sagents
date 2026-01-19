@@ -51,6 +51,9 @@ defmodule <%= @context_module %> do
   alias <%= @context_module %>.Conversation
   alias <%= @context_module %>.DisplayMessage
   alias <%= @scope_module %>, as: Scope
+  alias LangChain.Message.ContentPart
+  alias LangChain.Message.ToolCall
+  alias LangChain.Message.ToolResult
 
   #
   # Conversation CRUD
@@ -78,6 +81,21 @@ defmodule <%= @context_module %> do
     Conversation
     |> scope_query(scope)
     |> Repo.get!(id)
+  end
+
+  @doc """
+  Gets a conversation by ID, scoped to the given context.
+
+  Returns `{:ok, conversation}` or `{:error, :not_found}`.
+  """
+  def get_conversation(%Scope{} = scope, id) do
+    Conversation
+    |> scope_query(scope)
+    |> Repo.get(id)
+    |> case do
+      nil -> {:error, :not_found}
+      conversation -> {:ok, conversation}
+    end
   end
 
   @doc """
@@ -110,6 +128,11 @@ defmodule <%= @context_module %> do
     Repo.delete(conversation)
   end
 
+  def delete_conversation(%Scope{} = scope, conversation_id) when is_binary(conversation_id) do
+    conversation = get_conversation!(scope, conversation_id)
+    Repo.delete(conversation)
+  end
+
   #
   # Agent State Persistence
   #
@@ -138,6 +161,41 @@ defmodule <%= @context_module %> do
     case get_agent_state(conversation_id) do
       nil -> {:error, :not_found}
       state -> {:ok, state.state_data}
+    end
+  end
+
+  @doc """
+  Loads just the TODOs from a saved agent state.
+
+  This is useful for displaying TODOs in the UI when browsing historical
+  conversations without starting the agent. Returns an empty list if no
+  state exists or if there are no todos.
+
+  Reuses the same deserialization logic as full state restoration via
+  `Sagents.Todo.from_map/1`.
+  """
+  def load_todos(conversation_id) do
+    alias Sagents.Todo
+
+    case load_agent_state(conversation_id) do
+      {:ok, %{"state" => %{"todos" => todos}}} when is_list(todos) ->
+        # Reuse Todo.from_map/1 - same logic as StateSerializer.deserialize_state/2
+        todos
+        |> Enum.map(fn todo_map ->
+          case Todo.from_map(todo_map) do
+            {:ok, todo} -> todo
+            {:error, _} -> nil
+          end
+        end)
+        |> Enum.reject(&is_nil/1)
+
+      {:ok, _} ->
+        # State exists but no todos field
+        []
+
+      {:error, :not_found} ->
+        # No saved state
+        []
     end
   end
 
@@ -182,7 +240,7 @@ defmodule <%= @context_module %> do
 
     DisplayMessage
     |> where([m], m.conversation_id == ^conversation_id)
-    |> order_by([m], asc: m.inserted_at)
+    |> order_by([m], [asc: m.inserted_at, asc: m.sequence])
     |> limit(^limit)
     |> offset(^offset)
     |> Repo.all()
@@ -401,6 +459,236 @@ defmodule <%= @context_module %> do
     })
   end
 
+  #
+  # Tool Call/Result Message Functions
+  #
+
+  @doc """
+  Appends a tool call as a DisplayMessage to the conversation.
+
+  Tool calls represent the assistant requesting to execute a tool.
+  Each tool call includes the tool name, arguments, and a unique call_id.
+
+  ## Parameters
+
+  - conversation_id: UUID of the conversation
+  - tool_call: LangChain.Message.ToolCall struct with call_id, name, and arguments
+
+  ## Returns
+
+  - {:ok, %DisplayMessage{}} on success
+  - {:error, changeset} on validation failure
+
+  ## Example
+
+      tool_call = %ToolCall{
+        call_id: "call_123",
+        name: "search_web",
+        arguments: %{"query" => "Oslo attractions"}
+      }
+
+      {:ok, display_msg} = append_tool_call_message(conversation_id, tool_call)
+  """
+  @spec append_tool_call_message(Ecto.UUID.t(), ToolCall.t()) ::
+          {:ok, DisplayMessage.t()} | {:error, Ecto.Changeset.t()}
+  def append_tool_call_message(conversation_id, %ToolCall{} = tool_call) do
+    content = %{
+      "call_id" => tool_call.call_id,
+      "name" => tool_call.name,
+      "arguments" => tool_call.arguments
+    }
+
+    attrs = %{
+      message_type: "assistant",
+      content_type: "tool_call",
+      content: content,
+      sequence: 0,
+      metadata: %{}
+    }
+
+    conversation_id
+    |> DisplayMessage.create_changeset(attrs)
+    |> Repo.insert()
+  end
+
+  @doc """
+  Appends a tool result as a DisplayMessage to the conversation.
+
+  Tool results represent the system's response after executing a tool.
+  Each result includes the tool_call_id (linking back to the request),
+  tool name, result content, and error status.
+
+  ## Parameters
+
+  - conversation_id: UUID of the conversation
+  - tool_result: LangChain.Message.ToolResult struct
+
+  ## Returns
+
+  - {:ok, %DisplayMessage{}} on success
+  - {:error, changeset} on validation failure
+
+  ## Example
+
+      tool_result = %ToolResult{
+        tool_call_id: "call_123",
+        name: "search_web",
+        content: "Found 5 attractions in Oslo...",
+        is_error: false
+      }
+
+      {:ok, display_msg} = append_tool_result_message(conversation_id, tool_result)
+  """
+  @spec append_tool_result_message(Ecto.UUID.t(), ToolResult.t()) ::
+          {:ok, DisplayMessage.t()} | {:error, Ecto.Changeset.t()}
+  def append_tool_result_message(conversation_id, %ToolResult{} = tool_result) do
+    # Use built-in ContentPart helper - handles nil, string, and [ContentPart] cases
+    content_str = ContentPart.content_to_string(tool_result.content) || ""
+
+    content = %{
+      "tool_call_id" => tool_result.tool_call_id,
+      "name" => tool_result.name,
+      "content" => content_str,
+      "is_error" => tool_result.is_error
+    }
+
+    attrs = %{
+      message_type: "tool",
+      content_type: "tool_result",
+      content: content,
+      sequence: 0,
+      metadata: %{}
+    }
+
+    conversation_id
+    |> DisplayMessage.create_changeset(attrs)
+    |> Repo.insert()
+  end
+
+  @doc """
+  Appends multiple tool calls as DisplayMessages to the conversation.
+
+  When an assistant message includes multiple tool calls, this function
+  creates a DisplayMessage for each one with proper sequence ordering.
+
+  ## Parameters
+
+  - conversation_id: UUID of the conversation
+  - tool_calls: List of LangChain.Message.ToolCall structs
+
+  ## Returns
+
+  - {:ok, [%DisplayMessage{}, ...]} on success (list of created messages)
+  - {:error, changeset} on validation failure
+
+  ## Example
+
+      tool_calls = [
+        %ToolCall{call_id: "call_1", name: "search_web", arguments: %{...}},
+        %ToolCall{call_id: "call_2", name: "get_weather", arguments: %{...}}
+      ]
+
+      {:ok, display_msgs} = append_tool_calls_batch(conversation_id, tool_calls)
+  """
+  @spec append_tool_calls_batch(Ecto.UUID.t(), [ToolCall.t()]) ::
+          {:ok, [DisplayMessage.t()]} | {:error, Ecto.Changeset.t()}
+  def append_tool_calls_batch(conversation_id, tool_calls) when is_list(tool_calls) do
+    results =
+      tool_calls
+      |> Enum.with_index()
+      |> Enum.map(fn {tool_call, index} ->
+        content = %{
+          "call_id" => tool_call.call_id,
+          "name" => tool_call.name,
+          "arguments" => tool_call.arguments
+        }
+
+        attrs = %{
+          message_type: "assistant",
+          content_type: "tool_call",
+          content: content,
+          sequence: index,
+          metadata: %{}
+        }
+
+        conversation_id
+        |> DisplayMessage.create_changeset(attrs)
+        |> Repo.insert()
+      end)
+
+    errors = Enum.filter(results, &match?({:error, _}, &1))
+
+    if Enum.empty?(errors) do
+      {:ok, Enum.map(results, fn {:ok, msg} -> msg end)}
+    else
+      hd(errors)
+    end
+  end
+
+  @doc """
+  Appends multiple tool results as DisplayMessages to the conversation.
+
+  When a tool message includes multiple results, this function creates
+  a DisplayMessage for each one with proper sequence ordering.
+
+  ## Parameters
+
+  - conversation_id: UUID of the conversation
+  - tool_results: List of LangChain.Message.ToolResult structs
+
+  ## Returns
+
+  - {:ok, [%DisplayMessage{}, ...]} on success (list of created messages)
+  - {:error, changeset} on validation failure
+
+  ## Example
+
+      tool_results = [
+        %ToolResult{tool_call_id: "call_1", name: "search_web", content: "..."},
+        %ToolResult{tool_call_id: "call_2", name: "get_weather", content: "..."}
+      ]
+
+      {:ok, display_msgs} = append_tool_results_batch(conversation_id, tool_results)
+  """
+  @spec append_tool_results_batch(Ecto.UUID.t(), [ToolResult.t()]) ::
+          {:ok, [DisplayMessage.t()]} | {:error, Ecto.Changeset.t()}
+  def append_tool_results_batch(conversation_id, tool_results) when is_list(tool_results) do
+    results =
+      tool_results
+      |> Enum.with_index()
+      |> Enum.map(fn {tool_result, index} ->
+        # Use built-in ContentPart helper - handles nil, string, and [ContentPart] cases
+        content_str = ContentPart.content_to_string(tool_result.content) || ""
+
+        content = %{
+          "tool_call_id" => tool_result.tool_call_id,
+          "name" => tool_result.name,
+          "content" => content_str,
+          "is_error" => tool_result.is_error
+        }
+
+        attrs = %{
+          message_type: "tool",
+          content_type: "tool_result",
+          content: content,
+          sequence: index,
+          metadata: %{}
+        }
+
+        conversation_id
+        |> DisplayMessage.create_changeset(attrs)
+        |> Repo.insert()
+      end)
+
+    errors = Enum.filter(results, &match?({:error, _}, &1))
+
+    if Enum.empty?(errors) do
+      {:ok, Enum.map(results, fn {:ok, msg} -> msg end)}
+    else
+      hd(errors)
+    end
+  end
+
   @doc """
   Filters messages by content type.
 
@@ -416,7 +704,7 @@ defmodule <%= @context_module %> do
     from(m in DisplayMessage,
       where: m.conversation_id == ^conversation_id,
       where: m.content_type == ^content_type,
-      order_by: [asc: m.inserted_at],
+      order_by: [asc: m.inserted_at, asc: m.sequence],
       limit: ^limit,
       offset: ^offset
     )

@@ -30,7 +30,9 @@ defmodule <%= module %> do
 
   """
 
-  alias LangChain.Agents.{AgentServer, AgentSupervisor, State}
+  alias Sagents.{State, AgentServer, AgentSupervisor}
+  alias LangChain.Message
+  alias LangChain.Message.DisplayHelpers
   require Logger
 
   # PubSub configuration - single source of truth
@@ -158,7 +160,7 @@ defmodule <%= module %> do
   def ensure_subscribed_to_conversation(conversation_id) do
     agent_id = conversation_agent_id(conversation_id)
     topic = agent_topic(agent_id)
-    LangChain.PubSub.subscribe(@pubsub_module, @pubsub_name, topic)
+    Sagents.PubSub.subscribe(@pubsub_module, @pubsub_name, topic)
   end
 
   @doc """
@@ -176,7 +178,7 @@ defmodule <%= module %> do
   def subscribe_to_conversation(conversation_id) do
     agent_id = conversation_agent_id(conversation_id)
     topic = agent_topic(agent_id)
-    LangChain.PubSub.raw_subscribe(@pubsub_module, @pubsub_name, topic)
+    Sagents.PubSub.raw_subscribe(@pubsub_module, @pubsub_name, topic)
   end
 
   @doc """
@@ -187,7 +189,7 @@ defmodule <%= module %> do
   def unsubscribe_from_conversation(conversation_id) do
     agent_id = conversation_agent_id(conversation_id)
     topic = agent_topic(agent_id)
-    LangChain.PubSub.unsubscribe(@pubsub_module, @pubsub_name, topic)
+    Sagents.PubSub.unsubscribe(@pubsub_module, @pubsub_name, topic)
   end
 
   @doc """
@@ -230,7 +232,32 @@ defmodule <%= module %> do
   def track_conversation_viewer(conversation_id, viewer_id, pid, metadata \\ %{}) do
     topic = presence_topic(conversation_id)
     full_metadata = Map.merge(%{joined_at: System.system_time(:second)}, metadata)
-    LangChain.Presence.track(@presence_module, topic, viewer_id, pid, full_metadata)
+    Sagents.Presence.track(@presence_module, topic, viewer_id, pid, full_metadata)
+  end
+
+  @doc """
+  Untrack a viewer's presence from a conversation.
+
+  Call this when switching between conversations to properly clean up presence tracking.
+
+  ## Parameters
+
+    - `conversation_id` - The conversation to untrack from
+    - `viewer_id` - Unique identifier for the viewer (typically user_id)
+    - `pid` - The process to untrack (typically self())
+
+  ## Returns
+
+    - `:ok` - Presence untracked successfully
+
+  ## Examples
+
+      # When switching conversations
+      <%= module %>.untrack_conversation_viewer(old_conversation_id, user.id, self())
+  """
+  def untrack_conversation_viewer(conversation_id, viewer_id, pid) do
+    topic = presence_topic(conversation_id)
+    Sagents.Presence.untrack(@presence_module, topic, viewer_id, pid)
   end
 
   @doc """
@@ -240,7 +267,7 @@ defmodule <%= module %> do
   """
   def list_conversation_viewers(conversation_id) do
     topic = presence_topic(conversation_id)
-    LangChain.Presence.list(@presence_module, topic)
+    Sagents.Presence.list(@presence_module, topic)
   end
 
   @doc """
@@ -251,6 +278,91 @@ defmodule <%= module %> do
   def conversation_topic(conversation_id) do
     agent_id = conversation_agent_id(conversation_id)
     agent_topic(agent_id)
+  end
+
+  @doc """
+  Get the PubSub name used by this coordinator.
+
+  Returns the atom name of the PubSub server.
+  """
+  def pubsub_name do
+    @pubsub_name
+  end
+
+  @doc """
+  Save a LangChain Message as DisplayMessage(s) to the database.
+
+  Converts a single LangChain.Message into one or more DisplayMessage records
+  and persists them to the conversation. A single Message can produce multiple
+  DisplayMessages (e.g., text + tool_calls, or multiple tool_results).
+
+  This function bridges the gap between the library's Message-centric world
+  and the application's DisplayMessage persistence layer.
+
+  ## Parameters
+
+  - `conversation_id` - The conversation ID
+  - `message` - A `%LangChain.Message{}` struct
+
+  ## Returns
+
+  - `{:ok, [%DisplayMessage{}]}` - List of saved DisplayMessages
+  - `{:error, reason}` - Failed to save
+
+  ## Examples
+
+      # User message
+      message = Message.new_user!("Hello")
+      {:ok, [display_msg]} = <%= module %>.save_message(conversation_id, message)
+
+      # Assistant message with text and tool calls
+      message = Message.new_assistant!(%{
+        content: "Let me search...",
+        tool_calls: [ToolCall.new!(%{...})]
+      })
+      {:ok, [text_msg, tool_call_msg]} = <%= module %>.save_message(conversation_id, message)
+  """
+  def save_message(conversation_id, %Message{} = message) do
+    Logger.debug("#{__MODULE__}.save_message called for conversation #{conversation_id}, message role: #{message.role}")
+
+    # Use library helper to extract displayable items
+    display_items = DisplayHelpers.extract_display_items(message)
+    Logger.debug("Extracted #{length(display_items)} display items from message")
+
+    if Enum.empty?(display_items) do
+      Logger.warning("Received Message with no displayable content: #{inspect(message)}")
+      {:ok, []}
+    else
+      result =
+        Enum.reduce_while(display_items, {:ok, []}, fn item, {:ok, acc} ->
+          attrs = %{
+            "message_type" => Atom.to_string(item.message_type),
+            "content_type" => Atom.to_string(item.type),
+            "content" => item.content
+          }
+
+          Logger.debug("Attempting to save display message: type=#{attrs["content_type"]}, message_type=#{attrs["message_type"]}")
+
+          case <%= conversations_module %>.append_display_message(conversation_id, attrs) do
+            {:ok, display_msg} ->
+              Logger.debug("Successfully persisted DisplayMessage id=#{display_msg.id}")
+              {:cont, {:ok, acc ++ [display_msg]}}
+
+            {:error, reason} ->
+              Logger.error("Failed to persist DisplayMessage (#{attrs["content_type"]}): #{inspect(reason)}")
+              {:halt, {:error, reason}}
+          end
+        end)
+
+      case result do
+        {:ok, display_messages} ->
+          Logger.debug("Returning #{length(display_messages)} display messages")
+          {:ok, display_messages}
+
+        error ->
+          error
+      end
+    end
   end
 
   # Private Functions
@@ -268,14 +380,26 @@ defmodule <%= module %> do
   defp do_start_session(conversation_id, agent_id, opts) do
     Logger.info("Starting agent session for conversation #{conversation_id}")
 
-    # Create agent using Factory
-    agent = create_conversation_agent(conversation_id, opts)
+    # 1. Extract options
+    timezone = Keyword.get(opts, :timezone, "UTC")
+    factory_opts = Keyword.get(opts, :factory_opts, [])
 
-    # Load state from database (or create fresh)
+    # 2. Create agent from factory (configuration from code)
+    merged_factory_opts =
+      factory_opts
+      |> Keyword.put(:agent_id, agent_id)
+      |> Keyword.put(:timezone, timezone)
+
+    {:ok, agent} = <%= factory_module %>.create_agent(merged_factory_opts)
+
+    # 3. Load or create state (data from database)
     {:ok, state} = create_conversation_state(conversation_id)
 
-    # Start supervised agent
-    inactivity_timeout = Keyword.get(opts, :inactivity_timeout, :timer.hours(1))
+    # 4. Extract configuration from options
+    inactivity_timeout = Keyword.get(opts, :inactivity_timeout, :timer.minutes(@inactivity_timeout_minutes))
+
+    # 5. Start the AgentSupervisor with proper configuration
+    supervisor_name = AgentSupervisor.get_name(agent_id)
 
     # Configure presence tracking for smart shutdown
     presence_tracking = [
@@ -284,113 +408,94 @@ defmodule <%= module %> do
       topic: presence_topic(conversation_id)
     ]
 
-    supervisor_opts = [
+    supervisor_config = [
+      name: supervisor_name,
       agent: agent,
       initial_state: state,
       pubsub: {@pubsub_module, @pubsub_name},
+      debug_pubsub: {@pubsub_module, @pubsub_name},
       inactivity_timeout: inactivity_timeout,
-      presence_tracking: presence_tracking
+      presence_tracking: presence_tracking,
+      presence_module: @presence_module,
+      conversation_id: conversation_id,
+      save_new_message_fn: &__MODULE__.save_message/2
     ]
 
-    case AgentSupervisor.start_link(supervisor_opts) do
-      {:ok, _pid} ->
-        {:ok,
-         %{
-           agent_id: agent_id,
-           pid: AgentServer.get_pid(agent_id),
-           conversation_id: conversation_id
-         }}
-
-      {:error, {:already_started, _}} ->
-        # Race condition: another process started it
-        # Return :ok for consistent API (idempotent)
-        Logger.debug("Race condition starting agent #{agent_id}, returning existing session")
+    case AgentSupervisor.start_link_sync(supervisor_config) do
+      {:ok, _supervisor_pid} ->
+        pid = AgentServer.get_pid(agent_id)
 
         {:ok,
          %{
            agent_id: agent_id,
-           pid: AgentServer.get_pid(agent_id),
+           pid: pid,
            conversation_id: conversation_id
          }}
 
-      {:error, reason} = error ->
+      {:error, {:already_started, _supervisor_pid}} ->
+        # Race condition - someone else started it
+        pid = AgentServer.get_pid(agent_id)
+
+        {:ok,
+         %{
+           agent_id: agent_id,
+           pid: pid,
+           conversation_id: conversation_id
+         }}
+
+      {:error, reason} ->
         Logger.error("Failed to start agent session: #{inspect(reason)}")
-        error
+        {:error, reason}
     end
   end
 
   defp create_conversation_agent(conversation_id, opts) do
-    # TODO: Update with your Factory module
     factory_opts = Keyword.get(opts, :factory_opts, [])
+    agent_id = conversation_agent_id(conversation_id)
 
-    # Example integration:
-    # <%= factory_module %>.create_demo_agent(
-    #   Keyword.merge(factory_opts, conversation_id: conversation_id)
-    # )
+    {:ok, agent} = <%= factory_module %>.create_agent(
+      Keyword.merge(factory_opts, agent_id: agent_id)
+    )
 
-    raise """
-    TODO: Integrate with your Factory module
-
-    Update this function in #{__MODULE__} to create agents using your Factory:
-
-        defp create_conversation_agent(conversation_id, opts) do
-          factory_opts = Keyword.get(opts, :factory_opts, [])
-          agent_id = conversation_agent_id(conversation_id)
-
-          {:ok, agent} = <%= factory_module %>.create_demo_agent(
-            Keyword.merge(factory_opts, agent_id: agent_id, conversation_id: conversation_id)
-          )
-
-          agent
-        end
-    """
+    agent
   end
 
   defp create_conversation_state(conversation_id) do
     agent_id = conversation_agent_id(conversation_id)
 
-    # TODO: Update with your Conversations context
+    case <%= conversations_module %>.load_agent_state(conversation_id) do
+      {:ok, exported_state} ->
+        Logger.info("Found saved state for conversation #{conversation_id}, attempting to restore...")
 
-    # Example integration:
-    # case <%= conversations_module %>.load_agent_state(conversation_id) do
-    #   {:ok, exported_state} ->
-    #     Logger.info("Found saved state for conversation #{conversation_id}, attempting to restore...")
-    #
-    #     # exported_state has structure: %{"version" => 1, "state" => %{"messages" => [...], ...}}
-    #     # We need to pass just the nested "state" field to the deserializer
-    #     nested_state = exported_state["state"]
-    #
-    #     if is_nil(nested_state) do
-    #       Logger.warning(
-    #         "Exported state for conversation #{conversation_id} has no 'state' field, using fresh state"
-    #       )
-    #
-    #       {:ok, State.new!(%{})}
-    #     else
-    #       # Deserialize with proper agent_id (agent_id is not serialized)
-    #       case State.from_serialized(agent_id, nested_state) do
-    #         {:ok, state} ->
-    #           Logger.info(
-    #             "Successfully restored agent state for conversation #{conversation_id} with #{length(state.messages)} messages"
-    #           )
-    #
-    #           {:ok, state}
-    #
-    #         {:error, reason} ->
-    #           Logger.warning(
-    #             "Failed to deserialize agent state for conversation #{conversation_id}: #{inspect(reason)}, using fresh state"
-    #           )
-    #
-    #           {:ok, State.new!(%{})}
-    #       end
-    #     end
-    #
-    #   {:error, :not_found} ->
-    #     Logger.info("No saved state found for conversation #{conversation_id}, creating fresh state")
-    #     {:ok, State.new!(%{})}
-    # end
+        nested_state = exported_state["state"]
 
-    # For now, return fresh state until you integrate with your Conversations context
-    {:ok, State.new!(%{})}
+        if is_nil(nested_state) do
+          Logger.warning(
+            "Exported state for conversation #{conversation_id} has no 'state' field, using fresh state"
+          )
+
+          {:ok, State.new!(%{})}
+        else
+          case State.from_serialized(agent_id, nested_state) do
+            {:ok, state} ->
+              Logger.info(
+                "Successfully restored agent state for conversation #{conversation_id} with #{length(state.messages)} messages"
+              )
+
+              {:ok, state}
+
+            {:error, reason} ->
+              Logger.warning(
+                "Failed to deserialize agent state for conversation #{conversation_id}: #{inspect(reason)}, using fresh state"
+              )
+
+              {:ok, State.new!(%{})}
+          end
+        end
+
+      {:error, :not_found} ->
+        Logger.info("No saved state found for conversation #{conversation_id}, creating fresh state")
+        {:ok, State.new!(%{})}
+    end
   end
 end

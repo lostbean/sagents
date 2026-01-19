@@ -16,6 +16,7 @@ defmodule Mix.Tasks.Sagents.Gen.Coordinator do
     * `--factory` - The Factory module name (default: MyApp.Agents.Factory)
     * `--conversations` - The Conversations context (default: MyApp.Conversations)
     * `--pubsub` - The PubSub module (default: MyApp.PubSub)
+    * `--presence` - The Presence module (default: MyAppWeb.Presence)
 
   ## Generated Files
 
@@ -39,7 +40,8 @@ defmodule Mix.Tasks.Sagents.Gen.Coordinator do
     module: :string,
     factory: :string,
     conversations: :string,
-    pubsub: :string
+    pubsub: :string,
+    presence: :string
   ]
 
   @impl Mix.Task
@@ -55,13 +57,15 @@ defmodule Mix.Tasks.Sagents.Gen.Coordinator do
     factory = Keyword.get(opts, :factory, "#{app_module}.Agents.Factory")
     conversations = Keyword.get(opts, :conversations, "#{app_module}.Conversations")
     pubsub = Keyword.get(opts, :pubsub, "#{app_module}.PubSub")
+    presence = Keyword.get(opts, :presence, "#{app_module}Web.Presence")
 
     # Generate file
     binding = [
       module: module,
       factory_module: factory,
       conversations_module: conversations,
-      pubsub_module: String.to_atom(pubsub)
+      pubsub_module: String.to_atom(pubsub),
+      presence_module: String.to_atom(presence)
     ]
 
     template_path = Application.app_dir(:sagents, "priv/templates/coordinator.ex.eex")
