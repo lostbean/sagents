@@ -82,19 +82,27 @@ defmodule Mix.Tasks.Sagents.Gen.Coordinator do
       #{module_path}
 
     Next steps:
-      1. Integrate with your Factory module in `create_conversation_agent/2`
-      2. Integrate with your Conversations context in `create_conversation_state/1`
-      3. Customize agent_id mapping in `conversation_agent_id/1` if needed
-      4. Add telemetry/logging hooks if desired
+      1. Generate a Factory module (if not already created):
+         mix sagents.gen.factory --module #{factory}
+
+      2. Customize your Factory's middleware and model configuration
+
+      3. Ensure your Conversations context (#{conversations}) has:
+         - load_agent_state/1
+         - append_display_message/2
+
+      4. Customize agent_id mapping in `conversation_agent_id/1` if needed
+
+      5. Add telemetry/logging hooks if desired
 
     See the module documentation for usage examples.
     """)
   end
 
-  defp module_to_path(module) do
+  defp module_to_path(module) when is_binary(module) do
     path =
       module
-      |> Module.split()
+      |> String.split(".")
       |> Enum.map(&Macro.underscore/1)
       |> Path.join()
 
