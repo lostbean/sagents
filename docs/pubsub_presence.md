@@ -239,7 +239,7 @@ Useful for syncing UI with database state.
 
 Debug events provide detailed insight into agent internals.
 
-> **Note:** While you can subscribe to debug events directly, the `sagents_live_debugger` package already uses these events to provide a powerful real-time debugging dashboard. It visualizes agent state, middleware actions, and sub-agent hierarchies out of the box. See the [Live Debugger documentation](https://github.com/sagents-ai/sagents_live_debugger/README.md) for setup instructions.
+> **Note:** While you can subscribe to debug events directly, the `sagents_live_debugger` package already uses these events to provide a powerful real-time debugging dashboard. It visualizes agent state, middleware actions, and sub-agent hierarchies out of the box. See the [Live Debugger documentation](https://github.com/sagents-ai/sagents_live_debugger) for setup instructions.
 
 ### State Updates
 

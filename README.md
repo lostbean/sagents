@@ -473,7 +473,7 @@ scope "/dev" do
 end
 ```
 
-[View sagents_live_debugger →](https://github.com/brainlid/sagents_live_debugger)
+[View sagents_live_debugger →](https://github.com/sagents-ai/sagents_live_debugger)
 
 ## Documentation
 
