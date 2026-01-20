@@ -450,7 +450,7 @@ A complete Phoenix LiveView application demonstrating Sagents in action:
 - File system operations with persistence
 - SubAgent delegation patterns
 
-[View agents_demo →](https://github.com/brainlid/agents_demo)
+[View agents_demo →](https://github.com/sagents-ai/agents_demo)
 
 ### sagents_live_debugger
 
