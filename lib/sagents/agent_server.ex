@@ -1968,7 +1968,10 @@ defmodule Sagents.AgentServer do
     case {server_state.pubsub, server_state.presence_config} do
       {{_pubsub_mod, pubsub_name}, %{topic: topic}} ->
         Phoenix.PubSub.subscribe(pubsub_name, topic)
-        Logger.debug("Agent #{server_state.agent.agent_id} subscribed to presence topic: #{topic}")
+
+        Logger.debug(
+          "Agent #{server_state.agent.agent_id} subscribed to presence topic: #{topic}"
+        )
 
       _ ->
         :ok

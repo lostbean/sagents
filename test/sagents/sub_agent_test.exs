@@ -790,20 +790,20 @@ defmodule Sagents.SubAgentTest do
 
       # SubAgent middleware should be filtered out
       refute Enum.any?(result, fn
-        %MiddlewareEntry{module: Sagents.Middleware.SubAgent} -> true
-        _ -> false
-      end)
+               %MiddlewareEntry{module: Sagents.Middleware.SubAgent} -> true
+               _ -> false
+             end)
 
       # Other middleware should remain
       assert Enum.any?(result, fn
-        %MiddlewareEntry{module: Sagents.Middleware.TodoList} -> true
-        _ -> false
-      end)
+               %MiddlewareEntry{module: Sagents.Middleware.TodoList} -> true
+               _ -> false
+             end)
 
       assert Enum.any?(result, fn
-        %MiddlewareEntry{module: Sagents.Middleware.FileSystem} -> true
-        _ -> false
-      end)
+               %MiddlewareEntry{module: Sagents.Middleware.FileSystem} -> true
+               _ -> false
+             end)
 
       # Should have 2 items (TodoList and FileSystem) - SubAgent filtered out
       # Note: Agent.new adds other default middleware, so we check for at least these
@@ -904,9 +904,7 @@ defmodule Sagents.SubAgentTest do
 
       # Block TodoList, but SubAgent middleware should also be filtered automatically
       result =
-        SubAgent.subagent_middleware_stack(middleware, [],
-          block_middleware: [TodoList]
-        )
+        SubAgent.subagent_middleware_stack(middleware, [], block_middleware: [TodoList])
 
       modules = Enum.map(result, &SubAgent.extract_middleware_module/1)
 
@@ -953,9 +951,7 @@ defmodule Sagents.SubAgentTest do
 
       # agent.middleware contains MiddlewareEntry structs
       result =
-        SubAgent.subagent_middleware_stack(agent.middleware, [],
-          block_middleware: [FileSystem]
-        )
+        SubAgent.subagent_middleware_stack(agent.middleware, [], block_middleware: [FileSystem])
 
       modules = Enum.map(result, &SubAgent.extract_middleware_module/1)
 
@@ -1015,9 +1011,7 @@ defmodule Sagents.SubAgentTest do
       assert SubAgent.extract_middleware_module({Sagents.Middleware.TodoList, []}) ==
                Sagents.Middleware.TodoList
 
-      assert SubAgent.extract_middleware_module(
-               {Sagents.Middleware.FileSystem, [opt: 1]}
-             ) ==
+      assert SubAgent.extract_middleware_module({Sagents.Middleware.FileSystem, [opt: 1]}) ==
                Sagents.Middleware.FileSystem
     end
 
@@ -1068,8 +1062,7 @@ defmodule Sagents.SubAgentTest do
           system_prompt: "Test",
           replace_default_middleware: true,
           middleware: [
-            {Sagents.Middleware.HumanInTheLoop,
-             [interrupt_on: %{"dangerous_tool" => true}]}
+            {Sagents.Middleware.HumanInTheLoop, [interrupt_on: %{"dangerous_tool" => true}]}
           ]
         })
 

@@ -1088,7 +1088,8 @@ defmodule Sagents.Middleware.SubAgentTest do
       subagent_has_todo_tool =
         Enum.any?(subagent.tools, fn tool -> tool.name == "write_todos" end)
 
-      assert subagent_has_todo_tool, "Subagent should have write_todos tool from TodoList middleware"
+      assert subagent_has_todo_tool,
+             "Subagent should have write_todos tool from TodoList middleware"
     end
 
     test "verifies SubAgent middleware is filtered from MiddlewareEntry format in real execution" do
@@ -1261,9 +1262,7 @@ defmodule Sagents.Middleware.SubAgentTest do
 
       # Filter with block list
       filtered =
-        SubAgent.subagent_middleware_stack(parent_middleware, [],
-          block_middleware: block_list
-        )
+        SubAgent.subagent_middleware_stack(parent_middleware, [], block_middleware: block_list)
 
       raw_specs = MiddlewareEntry.to_raw_specs(filtered)
 

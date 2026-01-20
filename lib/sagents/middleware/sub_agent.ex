@@ -580,9 +580,7 @@ defmodule Sagents.Middleware.SubAgent do
           )
 
         not Code.ensure_loaded?(module) ->
-          Logger.warning(
-            "[SubAgent] block_middleware module #{inspect(module)} is not loaded"
-          )
+          Logger.warning("[SubAgent] block_middleware module #{inspect(module)} is not loaded")
 
         true ->
           :ok

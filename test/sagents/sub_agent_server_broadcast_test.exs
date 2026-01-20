@@ -150,7 +150,8 @@ defmodule Sagents.SubAgentServerBroadcastTest do
       Task.async(fn -> SubAgentServer.execute(subagent.id) end)
 
       # Should receive running status
-      assert_receive {:agent, {:debug, {:subagent, sub_id, {:subagent_status_changed, :running}}}},
+      assert_receive {:agent,
+                      {:debug, {:subagent, sub_id, {:subagent_status_changed, :running}}}},
                      1000
 
       assert sub_id == subagent.id
@@ -218,11 +219,12 @@ defmodule Sagents.SubAgentServerBroadcastTest do
 
         if call_count == 1 do
           # First call: return a tool call
-          tool_call = ToolCall.new!(%{
-            call_id: "call_test_123",
-            name: "get_weather",
-            arguments: Jason.encode!(%{"location" => "San Francisco"})
-          })
+          tool_call =
+            ToolCall.new!(%{
+              call_id: "call_test_123",
+              name: "get_weather",
+              arguments: Jason.encode!(%{"location" => "San Francisco"})
+            })
 
           {:ok, [Message.new_assistant!(%{tool_calls: [tool_call]})]}
         else
@@ -238,7 +240,8 @@ defmodule Sagents.SubAgentServerBroadcastTest do
       assert_receive {:agent, {:debug, {:subagent, _, {:subagent_status_changed, :running}}}}
 
       # Should receive llm_message event for the first assistant message (with tool calls)
-      assert_receive {:agent, {:debug, {:subagent, sub_id, {:subagent_llm_message, tool_call_msg}}}}
+      assert_receive {:agent,
+                      {:debug, {:subagent, sub_id, {:subagent_llm_message, tool_call_msg}}}}
 
       assert sub_id == subagent.id
       assert tool_call_msg.role == :assistant
@@ -246,7 +249,8 @@ defmodule Sagents.SubAgentServerBroadcastTest do
       assert hd(tool_call_msg.tool_calls).name == "get_weather"
 
       # Should receive llm_message event for the tool result
-      assert_receive {:agent, {:debug, {:subagent, ^sub_id, {:subagent_llm_message, tool_result_msg}}}}
+      assert_receive {:agent,
+                      {:debug, {:subagent, ^sub_id, {:subagent_llm_message, tool_result_msg}}}}
 
       assert tool_result_msg.role == :tool
       assert length(tool_result_msg.tool_results) == 1
@@ -404,8 +408,7 @@ defmodule Sagents.SubAgentServerBroadcastTest do
         create_test_agent(
           tools: [file_write_tool],
           middleware: [
-            {Sagents.Middleware.HumanInTheLoop,
-             interrupt_on: %{"file_write" => true}}
+            {Sagents.Middleware.HumanInTheLoop, interrupt_on: %{"file_write" => true}}
           ]
         )
 
@@ -423,7 +426,9 @@ defmodule Sagents.SubAgentServerBroadcastTest do
       # Add the assistant message with tool call to the chain
       # This simulates the state after execute returned {:interrupt, ...}
       tool_call_message = Message.new_assistant!(%{tool_calls: [tool_call]})
-      chain_with_tool_call = LangChain.Chains.LLMChain.add_message(subagent.chain, tool_call_message)
+
+      chain_with_tool_call =
+        LangChain.Chains.LLMChain.add_message(subagent.chain, tool_call_message)
 
       # Build the interrupt_data that would have been created
       action_request = %{
@@ -464,7 +469,9 @@ defmodule Sagents.SubAgentServerBroadcastTest do
       assert sub_id == interrupted_subagent.id
 
       # Should receive llm_message event for the tool result (from executing the approved tool)
-      assert_receive {:agent, {:debug, {:subagent, ^sub_id, {:subagent_llm_message, tool_result_msg}}}}
+      assert_receive {:agent,
+                      {:debug, {:subagent, ^sub_id, {:subagent_llm_message, tool_result_msg}}}}
+
       assert tool_result_msg.role == :tool
       assert length(tool_result_msg.tool_results) == 1
       tool_result = hd(tool_result_msg.tool_results)
@@ -472,7 +479,9 @@ defmodule Sagents.SubAgentServerBroadcastTest do
       assert tool_result.name == "file_write"
 
       # Should receive llm_message event for the final assistant response
-      assert_receive {:agent, {:debug, {:subagent, ^sub_id, {:subagent_llm_message, assistant_msg}}}}
+      assert_receive {:agent,
+                      {:debug, {:subagent, ^sub_id, {:subagent_llm_message, assistant_msg}}}}
+
       assert assistant_msg.role == :assistant
       content_text = ContentPart.content_to_string(assistant_msg.content)
       assert content_text == "I've written the file test.txt successfully."
