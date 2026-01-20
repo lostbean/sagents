@@ -287,7 +287,7 @@ end
 
 ## Persistence
 
-### Code Generator
+### Persistence Code Generator
 
 Generate database schemas for conversation persistence:
 
@@ -304,6 +304,39 @@ This generates:
 - **AgentState schema** - Serialized agent state (messages, middleware state)
 - **DisplayMessage schema** - UI-friendly message representations
 - **Database migration**
+
+### Coordinator Code Generator
+
+Generate a Coordinator module to manage conversation-centric agent lifecycles:
+
+```bash
+mix sagents.gen.coordinator
+mix sagents.gen.coordinator --module MyApp.Agents.Coordinator
+mix sagents.gen.coordinator \
+  --module MyApp.Agents.Coordinator \
+  --factory MyApp.Agents.Factory \
+  --conversations MyApp.Conversations \
+  --pubsub MyApp.PubSub \
+  --presence MyAppWeb.Presence
+```
+
+This generates a Coordinator module that:
+- Maps `conversation_id` → `agent_id` (e.g., `"conversation-123"`)
+- Starts agents on-demand with idempotent session management
+- Loads persisted state from your Conversations context
+- Creates agents using your Factory module
+- Handles race conditions for concurrent session starts
+- Integrates with Phoenix.Presence for viewer tracking
+
+The generated Coordinator is a **starting template** designed to be customized for your application. Key functions to customize:
+
+- `conversation_agent_id/1` - Change the agent_id mapping strategy
+- `create_conversation_agent/2` - Integrate with your Factory module
+- `create_conversation_state/1` - Integrate with your Conversations context
+
+For a fully customized example with additional middleware configuration, see the [agents_demo](https://github.com/sagents-ai/agents_demo) project's Coordinator.
+
+The Coordinator is also required for [sagents_live_debugger](https://github.com/sagents-ai/sagents_live_debugger) integration.
 
 ### Usage Pattern
 
