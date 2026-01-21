@@ -285,104 +285,77 @@ defmodule MyApp.CustomMiddleware do
 end
 ```
 
-## Code Generators
+## Quick Setup
 
-Sagents provides code generators to scaffold the database layer, agent factory, and coordinator for your application. Run these generators in order:
-
-```bash
-# Step 1: Generate database persistence layer
-mix sagents.gen.persistence MyApp.Conversations \
-  --scope MyApp.Accounts.Scope \
-  --owner-type user \
-  --owner-field user_id
-
-# Step 2: Generate agent factory
-mix sagents.gen.factory --module MyApp.Agents.Factory
-
-# Step 3: Generate coordinator
-mix sagents.gen.coordinator \
-  --module MyApp.Agents.Coordinator \
-  --factory MyApp.Agents.Factory \
-  --conversations MyApp.Conversations \
-  --pubsub MyApp.PubSub \
-  --presence MyAppWeb.Presence
-```
-
-### Persistence Code Generator
-
-Generate database schemas for conversation persistence:
+Sagents provides a single command to scaffold everything you need for conversation-centric agents:
 
 ```bash
-mix sagents.gen.persistence MyApp.Conversations \
+mix sagents.setup MyApp.Conversations \
   --scope MyApp.Accounts.Scope \
   --owner-type user \
   --owner-field user_id
 ```
 
 This generates:
-- **Context module** - `MyApp.Conversations` with CRUD operations
-- **Conversation schema** - Metadata (title, timestamps, scope)
-- **AgentState schema** - Serialized agent state (messages, middleware state)
-- **DisplayMessage schema** - UI-friendly message representations
-- **Database migration**
+- **Persistence layer** - Database schemas and migration
+- **Factory module** - Agent creation with model/middleware configuration
+- **Coordinator module** - Session management and lifecycle orchestration
 
-### Factory Code Generator
+All configured to work together seamlessly based on your `--owner-type` and `--owner-field` settings.
 
-Generate a Factory module for creating agents with consistent configuration:
+### What Gets Generated
 
-```bash
-mix sagents.gen.factory
-mix sagents.gen.factory --module MyApp.Agents.Factory
-```
+The `mix sagents.setup` command creates a complete conversation infrastructure:
 
-This generates a Factory module that:
-- Centralizes agent creation with consistent model and middleware configuration
-- Provides a single source of truth for all agent capabilities
-- Includes default middleware stack (TodoList, FileSystem, SubAgent, Summarization, etc.)
-- Configures Human-in-the-Loop approval workflows
-- Supports model fallbacks for resilience
-- Uses a lighter model (Haiku) for title generation to optimize speed and costs
+#### 1. Persistence Layer
+- **Context module** (`MyApp.Conversations`) with CRUD operations
+- **Schemas**: Conversation, AgentState, DisplayMessage
+- **Database migration** for all tables
 
-The generated Factory is a **starting template** designed to be customized for your application. Key functions to customize:
+#### 2. Factory Module
+Centralizes agent creation at `MyApp.Agents.Factory` with:
+- Model configuration (ChatAnthropic by default, with fallback examples)
+- Default middleware stack (TodoList, FileSystem, SubAgent, Summarization, etc.)
+- Human-in-the-Loop configuration
+- Automatic filesystem scope extraction based on your owner type/field
 
+**Key functions to customize:**
 - `get_model_config/0` - Change LLM provider (OpenAI, Ollama, etc.)
 - `get_fallback_models/0` - Configure model fallbacks for resilience
 - `base_system_prompt/0` - Define your agent's personality and capabilities
-- `build_middleware/2` - Add/remove middleware from the stack
+- `build_middleware/3` - Add/remove middleware from the stack
 - `default_interrupt_on/0` - Configure which tools require human approval
+- `get_filesystem_scope/1` - Customize filesystem scoping strategy
 
-### Coordinator Code Generator
+#### 3. Coordinator Module
+Manages agent lifecycles at `MyApp.Agents.Coordinator` with:
+- Conversation ID → Agent ID mapping
+- On-demand agent starting with idempotent session management
+- State loading from your Conversations context
+- Race condition handling for concurrent starts
+- Phoenix.Presence integration for viewer tracking
 
-Generate a Coordinator module to manage conversation-centric agent lifecycles:
+**Key functions to customize:**
+- `conversation_agent_id/1` - Change the agent_id mapping strategy
+- `create_conversation_state/1` - Customize state loading behavior
+
+### Advanced Options
 
 ```bash
-mix sagents.gen.coordinator
-mix sagents.gen.coordinator --module MyApp.Agents.Coordinator
-mix sagents.gen.coordinator \
-  --module MyApp.Agents.Coordinator \
+mix sagents.setup MyApp.Conversations \
+  --scope MyApp.Accounts.Scope \
+  --owner-type user \
+  --owner-field user_id \
   --factory MyApp.Agents.Factory \
-  --conversations MyApp.Conversations \
+  --coordinator MyApp.Agents.Coordinator \
   --pubsub MyApp.PubSub \
-  --presence MyAppWeb.Presence
+  --presence MyAppWeb.Presence \
+  --table-prefix sagents_
 ```
 
-This generates a Coordinator module that:
-- Maps `conversation_id` → `agent_id` (e.g., `"conversation-123"`)
-- Starts agents on-demand with idempotent session management
-- Loads persisted state from your Conversations context
-- Creates agents using your Factory module
-- Handles race conditions for concurrent session starts
-- Integrates with Phoenix.Presence for viewer tracking
+All options have sensible defaults based on your context module and Phoenix conventions.
 
-The generated Coordinator is a **starting template** designed to be customized for your application. Key functions to customize:
-
-- `conversation_agent_id/1` - Change the agent_id mapping strategy
-- `create_conversation_agent/2` - Integrate with your Factory module
-- `create_conversation_state/1` - Integrate with your Conversations context
-
-For a fully customized example with additional middleware configuration, see the [agents_demo](https://github.com/sagents-ai/agents_demo) project's Coordinator.
-
-The Coordinator is also required for [sagents_live_debugger](https://github.com/sagents-ai/sagents_live_debugger) integration.
+For a fully customized example, see the [agents_demo](https://github.com/sagents-ai/agents_demo) project.
 
 ### Usage Pattern
 

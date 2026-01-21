@@ -26,7 +26,7 @@ defmodule <%= module %> do
   - Change agent_id mapping strategy in `conversation_agent_id/1`
   - Modify inactivity timeout in `start_conversation_session/2`
   - Add custom lifecycle hooks (telemetry, logging, permissions)
-  - Integrate with your Factory module
+  - Customize filesystem scoping in your Factory module's `get_filesystem_scope/1`
 
   """
 
@@ -385,9 +385,11 @@ defmodule <%= module %> do
     factory_opts = Keyword.get(opts, :factory_opts, [])
 
     # 2. Create agent from factory (configuration from code)
+    # The Factory will automatically load the filesystem scope from the conversation
     merged_factory_opts =
       factory_opts
       |> Keyword.put(:agent_id, agent_id)
+      |> Keyword.put(:conversation_id, conversation_id)
       |> Keyword.put(:timezone, timezone)
 
     {:ok, agent} = <%= factory_module %>.create_agent(merged_factory_opts)
@@ -447,17 +449,6 @@ defmodule <%= module %> do
         Logger.error("Failed to start agent session: #{inspect(reason)}")
         {:error, reason}
     end
-  end
-
-  defp create_conversation_agent(conversation_id, opts) do
-    factory_opts = Keyword.get(opts, :factory_opts, [])
-    agent_id = conversation_agent_id(conversation_id)
-
-    {:ok, agent} = <%= factory_module %>.create_agent(
-      Keyword.merge(factory_opts, agent_id: agent_id)
-    )
-
-    agent
   end
 
   defp create_conversation_state(conversation_id) do
