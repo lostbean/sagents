@@ -455,4 +455,42 @@ defmodule Sagents.AgentTest do
       assert agent.assembled_system_prompt =~ "write_todos"
     end
   end
+
+  describe "fallback models" do
+    test "accepts fallback_models field" do
+      fallback_model = mock_model()
+
+      {:ok, agent} =
+        Agent.new(%{
+          model: mock_model(),
+          fallback_models: [fallback_model]
+        })
+
+      assert agent.fallback_models == [fallback_model]
+    end
+
+    test "defaults to empty list when not provided" do
+      {:ok, agent} = Agent.new(%{model: mock_model()})
+
+      assert agent.fallback_models == []
+    end
+
+    test "accepts before_fallback function" do
+      before_fallback_fn = fn chain -> chain end
+
+      {:ok, agent} =
+        Agent.new(%{
+          model: mock_model(),
+          before_fallback: before_fallback_fn
+        })
+
+      assert agent.before_fallback == before_fallback_fn
+    end
+
+    test "defaults to nil when before_fallback not provided" do
+      {:ok, agent} = Agent.new(%{model: mock_model()})
+
+      assert agent.before_fallback == nil
+    end
+  end
 end

@@ -63,6 +63,11 @@ defmodule Sagents.Agent do
     # Timeout for async tool execution. Integer (ms) or :infinity.
     # Overrides application config when set. See LLMChain docs for details.
     field :async_tool_timeout, :any, virtual: true
+    # Fallback models to use when primary model fails
+    field :fallback_models, {:array, :any}, default: [], virtual: true
+    # Optional function to modify chain before each LLM attempt (including first)
+    # Signature: (LLMChain.t() -> LLMChain.t())
+    field :before_fallback, :any, virtual: true
   end
 
   @type t :: %Agent{}
@@ -76,7 +81,9 @@ defmodule Sagents.Agent do
     :middleware,
     :name,
     :filesystem_scope,
-    :async_tool_timeout
+    :async_tool_timeout,
+    :fallback_models,
+    :before_fallback
   ]
   @required_fields [:agent_id, :model]
 
@@ -95,6 +102,10 @@ defmodule Sagents.Agent do
   - `:async_tool_timeout` - Timeout for parallel tool execution. Integer (milliseconds) or
     `:infinity`. Overrides application-level config. See LLMChain module docs for details.
     (default: uses application config or `:infinity`)
+  - `:fallback_models` - List of ChatModel structs to try if primary model fails (default: [])
+  - `:before_fallback` - Optional function to modify chain before each attempt (default: nil).
+    Signature: `fn chain -> modified_chain end`.
+    Useful for provider-specific system prompts or modifications
 
   ## Options
 
@@ -627,7 +638,7 @@ defmodule Sagents.Agent do
   defp execute_model(%Agent{} = agent, %State{} = state, callbacks) do
     with {:ok, langchain_messages} <- validate_messages(state.messages),
          {:ok, chain} <- build_chain(agent, langchain_messages, state, callbacks),
-         result <- execute_chain(chain, agent.middleware) do
+         result <- execute_chain(chain, agent.middleware, agent) do
       case result do
         {:ok, executed_chain} ->
           extract_state_from_chain(executed_chain, state)
@@ -709,13 +720,39 @@ defmodule Sagents.Agent do
     LLMChain.add_callback(chain, callbacks)
   end
 
-  defp execute_chain(chain, middleware) do
+  # Build options for LLMChain.run/2, including fallback configuration
+  defp build_run_options(agent, base_opts \\ []) do
+    opts = base_opts
+
+    # Add fallback models if configured
+    opts =
+      if agent.fallback_models != [] do
+        Keyword.put(opts, :with_fallbacks, agent.fallback_models)
+      else
+        opts
+      end
+
+    # Add before_fallback function if configured
+    # NOTE: This fires for EVERY attempt, including the first
+    opts =
+      if agent.before_fallback do
+        Keyword.put(opts, :before_fallback, agent.before_fallback)
+      else
+        opts
+      end
+
+    opts
+  end
+
+  defp execute_chain(chain, middleware, agent) do
     # Check if we should use HITL execution mode
     if has_middleware?(middleware, HumanInTheLoop) do
-      execute_chain_with_hitl(chain, middleware)
+      execute_chain_with_hitl(chain, middleware, agent)
     else
       # Normal execution without interrupts
-      case LLMChain.run(chain, mode: :while_needs_response) do
+      run_opts = build_run_options(agent, mode: :while_needs_response)
+
+      case LLMChain.run(chain, run_opts) do
         {:ok, updated_chain} ->
           {:ok, updated_chain}
 
@@ -728,14 +765,16 @@ defmodule Sagents.Agent do
     end
   end
 
-  defp execute_chain_with_hitl(chain, middleware) do
+  defp execute_chain_with_hitl(chain, middleware, agent) do
     # Custom execution loop that checks for interrupts BEFORE executing tools
     # 1. Call LLM to get a response
     # 2. Check if response contains tool calls that need approval
     # 3. If yes, return interrupt WITHOUT executing tools
     # 4. If no, execute tools and continue loop
 
-    case LLMChain.run(chain) do
+    run_opts = build_run_options(agent)
+
+    case LLMChain.run(chain, run_opts) do
       {:ok, chain_after_llm} ->
         # Check if we have tool calls that need approval
         case check_for_interrupts(chain_after_llm, middleware) do
@@ -750,7 +789,7 @@ defmodule Sagents.Agent do
             # Check if we need to continue (needs_response)
             if chain_after_tools.needs_response do
               # Continue the loop
-              execute_chain_with_hitl(chain_after_tools, middleware)
+              execute_chain_with_hitl(chain_after_tools, middleware, agent)
             else
               # Done
               {:ok, chain_after_tools}
