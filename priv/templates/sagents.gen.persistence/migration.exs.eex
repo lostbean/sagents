@@ -5,7 +5,7 @@ defmodule <%= @repo %>.Migrations.Create<%= Macro.camelize(@table_prefix) %>Pers
     # Conversations table
     create table(:<%= @table_prefix %>conversations, primary_key: false) do
       add :id, :binary_id, primary_key: true
-<%= if @owner_type != "none" do %>      add :<%= @owner_field %>, references(:<%= @owner_type %>s, on_delete: :delete_all, type: :binary_id), null: false
+<%= if @owner_type != "none" do %>      add :<%= @owner_field %>, references(:<%= @owner_type %>s, on_delete: :delete_all), null: false
 <% end %>      add :title, :string
       add :version, :integer, default: 1, null: false
       add :metadata, :map, default: %{}

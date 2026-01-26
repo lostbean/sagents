@@ -16,7 +16,7 @@ defmodule <%= @context_module %>.Conversation do
   @foreign_key_type :binary_id
 
   schema "<%= @table_prefix %>conversations" do
-<%= if @owner_type != "none" do %>    belongs_to :<%= @owner_type %>, <%= @owner_module %>, foreign_key: :<%= @owner_field %>
+<%= if @owner_type != "none" do %>    belongs_to :<%= @owner_type %>, <%= @owner_module %>, foreign_key: :<%= @owner_field %>, type: :id
 <% end %>    has_one :agent_state, AgentState
     has_many :display_messages, DisplayMessage
 

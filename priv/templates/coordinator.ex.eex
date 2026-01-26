@@ -136,7 +136,7 @@ defmodule <%= module %> do
   Ensure the current process is subscribed to agent events for a conversation.
 
   This function is idempotent - safe to call multiple times. It delegates to
-  LangChain.PubSub.subscribe/3 for subscription management.
+  Sagents.PubSub.subscribe/3 for subscription management.
 
   This works even when the agent isn't running because PubSub topics exist
   independently of processes. When the agent later starts and publishes events,
