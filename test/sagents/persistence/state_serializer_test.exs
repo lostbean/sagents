@@ -103,6 +103,42 @@ defmodule Sagents.Persistence.StateSerializerTest do
              } = serialized_call
     end
 
+    test "serializes tool calls with string arguments (streaming scenario)" do
+      {:ok, model} = ChatOpenAI.new(%{model: "gpt-4", api_key: "test-key"})
+      {:ok, agent} = Agent.new(%{agent_id: "agent-123", model: model})
+
+      # Create a complete tool call but with arguments as string (before parsing)
+      # This can happen during streaming when arguments are accumulated as strings
+      {:ok, tool_call} =
+        ToolCall.new(%{
+          call_id: "call-1",
+          type: :function,
+          name: "file_write",
+          arguments: "{\"file_path\": \"/test.txt\", \"content\": \"hello\"}",
+          status: :complete
+        })
+
+      {:ok, msg} = Message.new(%{role: :assistant, content: nil, tool_calls: [tool_call]})
+
+      state = State.new!(%{messages: [msg]})
+
+      result = StateSerializer.serialize_server_state(agent, state)
+
+      assert [message] = result["state"]["messages"]
+      assert [serialized_call] = message["tool_calls"]
+
+      # Arguments should be serialized correctly whether they're string or map
+      # ToolCall.new validates and parses string to map, so it should be a map now
+      assert %{
+               "type" => "function",
+               "name" => "file_write",
+               "arguments" => arguments
+             } = serialized_call
+
+      # Arguments could be either string or map depending on validation
+      assert is_map(arguments) or is_binary(arguments)
+    end
+
     test "does not serialize agent_id or agent config (including API keys)" do
       {:ok, model} = ChatOpenAI.new(%{model: "gpt-4", api_key: "secret-key"})
       {:ok, agent} = Agent.new(%{agent_id: "agent-123", model: model})

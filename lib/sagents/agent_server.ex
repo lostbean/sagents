@@ -95,12 +95,26 @@ defmodule Sagents.AgentServer do
     - `shutdown_data.last_activity_at` - DateTime of last activity
     - `shutdown_data.shutdown_at` - DateTime when shutdown was initiated
 
+  ### Tool Execution Events
+  - `{:agent, {:tool_execution_started, tool_info}}` - Tool execution began
+    - `tool_info.call_id` - Unique identifier for this tool call
+    - `tool_info.name` - Technical tool name (e.g., "web_search")
+    - `tool_info.display_text` - User-friendly description (e.g., "Searching the web")
+    - `tool_info.arguments` - Tool arguments (for debug view)
+
+  - `{:agent, {:tool_execution_completed, call_id, tool_result}}` - Tool succeeded
+    - `call_id` - Matches the started event
+    - `tool_result` - ToolResult struct with response
+
+  - `{:agent, {:tool_execution_failed, call_id, error}}` - Tool failed
+    - `call_id` - Matches the started event
+    - `error` - Error reason or message
+
   ### LLM Streaming Events
   - `{:agent, {:llm_deltas, [%MessageDelta{}]}}` - Streaming tokens/deltas received (list
     of deltas)
   - `{:agent, {:llm_message, %Message{}}}` - Complete message received and processed
   - `{:agent, {:llm_token_usage, %TokenUsage{}}}` - Token usage information
-  - `{:agent, {:tool_response, %Message{}}}` - Tool execution result (optional)
 
   ### Message Persistence Events
   - `{:agent, {:display_message_saved, display_message}}` - Broadcast after message is
@@ -1824,8 +1838,41 @@ defmodule Sagents.AgentServer do
       # Callback for token usage information
       on_llm_token_usage: fn _chain, usage ->
         broadcast_event(server_state, {:llm_token_usage, usage})
+      end,
+
+      # Tool execution lifecycle callbacks
+      on_tool_execution_started: fn _chain, tool_call, function ->
+
+        tool_info = %{
+          call_id: tool_call.call_id,
+          name: tool_call.name,
+          display_text: function.display_text || friendly_name_fallback(tool_call.name),
+          arguments: tool_call.arguments
+        }
+
+        broadcast_event(server_state, {:tool_execution_started, tool_info})
+      end,
+      on_tool_execution_completed: fn _chain, tool_call, tool_result ->
+        broadcast_event(server_state, {:tool_execution_completed, tool_call.call_id, tool_result})
+      end,
+      on_tool_execution_failed: fn _chain, tool_call, error ->
+        error_msg =
+          case error do
+            %{message: msg} -> msg
+            msg when is_binary(msg) -> msg
+            _ -> inspect(error)
+          end
+
+        broadcast_event(server_state, {:tool_execution_failed, tool_call.call_id, error_msg})
       end
     }
+  end
+
+  # Generate friendly fallback name from technical name
+  defp friendly_name_fallback(tool_name) do
+    tool_name
+    |> String.replace("_", " ")
+    |> String.capitalize()
   end
 
   defp execute_agent(%ServerState{} = server_state, callbacks) do
@@ -1994,10 +2041,16 @@ defmodule Sagents.AgentServer do
               "Successfully saved #{length(display_messages)} display messages, broadcasting..."
             )
 
-            # Broadcast each saved DisplayMessage
-            Enum.each(display_messages, fn display_msg ->
-              broadcast_event(server_state, {:display_message_saved, display_msg})
-            end)
+            # When multiple messages saved (e.g., text + tool_calls), broadcast as batch
+            # to enable efficient single UI reload. Otherwise broadcast individual events.
+            if length(display_messages) > 1 do
+              broadcast_event(server_state, {:display_messages_batch_saved, display_messages})
+            else
+              # Single message - broadcast individual event
+              Enum.each(display_messages, fn display_msg ->
+                broadcast_event(server_state, {:display_message_saved, display_msg})
+              end)
+            end
 
             # Also broadcast the original message event
             # This maintains backward compatibility and allows UI to handle message completion

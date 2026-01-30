@@ -283,11 +283,20 @@ defmodule Sagents.Persistence.StateSerializer do
   defp deserialize_options(_), do: []
 
   defp serialize_tool_call(%ToolCall{} = tool_call) do
+    # Arguments can be either a map (when complete) or a string (during streaming)
+    arguments =
+      case tool_call.arguments do
+        nil -> %{}
+        arg when is_map(arg) -> serialize_map_to_string_keys(arg)
+        arg when is_binary(arg) -> arg
+        arg -> inspect(arg)
+      end
+
     %{
       "call_id" => tool_call.call_id,
       "type" => to_string(tool_call.type),
       "name" => tool_call.name,
-      "arguments" => serialize_map_to_string_keys(tool_call.arguments || %{}),
+      "arguments" => arguments,
       "status" => to_string(tool_call.status)
     }
     |> Enum.reject(fn {_k, v} -> is_nil(v) end)
