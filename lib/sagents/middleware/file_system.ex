@@ -263,6 +263,7 @@ defmodule Sagents.Middleware.FileSystem do
     Function.new!(%{
       name: "ls",
       description: description,
+      display_text: "Listing files",
       parameters_schema: %{
         type: "object",
         properties: %{
@@ -290,6 +291,7 @@ defmodule Sagents.Middleware.FileSystem do
     Function.new!(%{
       name: "read_file",
       description: description,
+      display_text: "Reading file",
       parameters_schema: %{
         type: "object",
         properties: %{
@@ -327,6 +329,7 @@ defmodule Sagents.Middleware.FileSystem do
     Function.new!(%{
       name: "write_file",
       description: description,
+      display_text: "Writing file",
       parameters_schema: %{
         type: "object",
         properties: %{
@@ -359,6 +362,7 @@ defmodule Sagents.Middleware.FileSystem do
     Function.new!(%{
       name: "edit_file",
       description: description,
+      display_text: "Editing file",
       parameters_schema: %{
         type: "object",
         properties: %{
@@ -399,6 +403,7 @@ defmodule Sagents.Middleware.FileSystem do
     Function.new!(%{
       name: "delete_file",
       description: description,
+      display_text: "Deleting file",
       parameters_schema: %{
         type: "object",
         properties: %{
@@ -438,6 +443,7 @@ defmodule Sagents.Middleware.FileSystem do
     Function.new!(%{
       name: "search_text",
       description: description,
+      display_text: "Searching files",
       parameters_schema: %{
         "type" => "object",
         "properties" => %{
@@ -505,6 +511,7 @@ defmodule Sagents.Middleware.FileSystem do
     Function.new!(%{
       name: "edit_lines",
       description: description,
+      display_text: "Editing file lines",
       parameters_schema: %{
         type: "object",
         properties: %{

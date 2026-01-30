@@ -138,6 +138,7 @@ defmodule Sagents.Middleware.TodoList do
     Function.new!(%{
       name: "write_todos",
       description: @tool_description,
+      display_text: "Updating task list",
       parameters_schema: %{
         type: "object",
         properties: %{

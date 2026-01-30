@@ -235,6 +235,7 @@ defmodule Sagents.Middleware.SubAgent do
     Function.new!(%{
       name: "task",
       description: description,
+      display_text: "Starting sub-agent",
       parameters_schema: %{
         type: "object",
         required: ["instructions", "subagent_type"],
