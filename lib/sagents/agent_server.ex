@@ -1840,10 +1840,26 @@ defmodule Sagents.AgentServer do
         broadcast_event(server_state, {:llm_token_usage, usage})
       end,
 
-      # Tool execution lifecycle callbacks
-      on_tool_execution_started: fn _chain, tool_call, function ->
-
+      # Tool identification callback - fires early when tool name detected during streaming
+      on_tool_call_identified: fn _chain, tool_call, function ->
         tool_info = %{
+          # May be nil during early streaming
+          call_id: tool_call.call_id,
+          name: tool_call.name,
+          display_text: function.display_text || friendly_name_fallback(tool_call.name),
+          arguments: tool_call.arguments || %{},
+          status: :identified
+        }
+
+        broadcast_event(server_state, {:tool_call_identified, tool_info})
+      end,
+
+      # Tool execution lifecycle callbacks
+      # Note: This fires when tool execution actually begins (not during detection)
+      # The :on_tool_call_identified callback already fired earlier during streaming
+      on_tool_execution_started: fn _chain, tool_call, function ->
+        tool_info = %{
+          # Will always have call_id when executing
           call_id: tool_call.call_id,
           name: tool_call.name,
           display_text: function.display_text || friendly_name_fallback(tool_call.name),
