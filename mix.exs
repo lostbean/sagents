@@ -70,6 +70,61 @@ defmodule Sagents.MixProject do
       groups_for_extras: [
         Docs: Path.wildcard("docs/*.md")
       ],
+      groups_for_modules: [
+        "Core Agent": [
+          Sagents.Agent,
+          Sagents.AgentServer,
+          Sagents.AgentSupervisor,
+          Sagents.State,
+          Sagents.AgentUtils
+        ],
+        Middleware: [
+          Sagents.Middleware,
+          Sagents.MiddlewareEntry,
+          Sagents.Middleware.TodoList,
+          Sagents.Middleware.FileSystem,
+          Sagents.Middleware.HumanInTheLoop,
+          Sagents.Middleware.SubAgent,
+          Sagents.Middleware.Summarization,
+          Sagents.Middleware.ConversationTitle,
+          Sagents.Middleware.PatchToolCalls
+        ],
+        SubAgents: [
+          Sagents.SubAgent,
+          Sagents.SubAgentServer,
+          Sagents.SubAgentsDynamicSupervisor
+        ],
+        FileSystem: [
+          Sagents.FileSystem,
+          Sagents.FileSystemServer,
+          Sagents.FileSystem.FileEntry,
+          Sagents.FileSystem.FileMetadata,
+          Sagents.FileSystem.FileSystemConfig,
+          Sagents.FileSystem.FileSystemState,
+          Sagents.FileSystem.FileSystemSupervisor,
+          Sagents.FileSystem.Persistence,
+          Sagents.FileSystem.Persistence.Disk,
+          Sagents.FileSystemCallbacks
+        ],
+        Persistence: [
+          Sagents.Persistence.StateSerializer,
+          Sagents.Persistence.Hooks
+        ],
+        "Process Management": [
+          Sagents.Application,
+          Sagents.AgentsDynamicSupervisor
+        ],
+        "Events & Communication": [
+          Sagents.PubSub,
+          Sagents.Presence
+        ],
+        "Message Helpers": [
+          Sagents.Message.DisplayHelpers
+        ],
+        "Support Types": [
+          Sagents.Todo
+        ]
+      ],
       before_closing_head_tag: &before_closing_head_tag/1,
       before_closing_body_tag: &before_closing_body_tag/1
     ]
