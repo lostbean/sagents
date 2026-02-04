@@ -15,7 +15,7 @@ defmodule Sagents.State do
 
   The `agent_id` field is a **runtime identifier** used for process registration and
   coordination. You don't need to set it when creating states—the library
-  automatically injects it when you call `Agent.execute/2`, `Agent.resume/3`, or
+  automatically injects it when you call `Sagents.Agent.execute/2`, `Sagents.Agent.resume/3`, or
   start an `AgentServer`.
 
   ### Why it's automatic
