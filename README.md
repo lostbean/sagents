@@ -36,11 +36,45 @@ Add `sagents` to your list of dependencies in `mix.exs`:
 ```elixir
 def deps do
   [
-    {:sagents, "~> 0.1.0"},
-    {:langchain, "~> 0.5.1"}
+    {:sagents, "~> 0.1.0"}
   ]
 end
 ```
+
+LangChain is automatically included as a dependency.
+
+## Configuration
+
+Sagents builds on the [Elixir LangChain](https://github.com/brainlid/langchain) library for LLM integration. To use Sagents, you need to configure an LLM provider by setting the appropriate API key as an environment variable:
+
+```bash
+# For Anthropic (Claude)
+export ANTHROPIC_API_KEY="your-api-key"
+
+# For OpenAI (GPT)
+export OPENAI_API_KEY="your-api-key"
+
+# For Google (Gemini)
+export GOOGLE_API_KEY="your-api-key"
+```
+
+Then specify the model when creating your agent:
+
+```elixir
+# Anthropic Claude
+alias LangChain.ChatModels.ChatAnthropic
+model = ChatAnthropic.new!(%{model: "claude-sonnet-4-5-20250929"})
+
+# OpenAI GPT
+alias LangChain.ChatModels.ChatOpenAI
+model = ChatOpenAI.new!(%{model: "gpt-4o"})
+
+# Google Gemini
+alias LangChain.ChatModels.ChatGoogleAI
+model = ChatGoogleAI.new!(%{model: "gemini-2.0-flash-exp"})
+```
+
+For detailed configuration options, start here [LangChain documentation](https://hexdocs.pm/langchain/readme.html#installation).
 
 ## Quick Start
 
