@@ -43,9 +43,10 @@ defmodule Sagents.FileSystem.FileSystemSupervisorTest do
     end
 
     test "starts without a name" do
-      assert {:ok, pid} = FileSystemSupervisor.start_link()
+      # FileSystemSupervisor is already started by Application with default name
+      # So starting without a name should return already_started
+      assert {:error, {:already_started, pid}} = FileSystemSupervisor.start_link()
       assert Process.alive?(pid)
-      DynamicSupervisor.stop(pid)
     end
   end
 

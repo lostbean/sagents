@@ -15,7 +15,7 @@ A sage is a person who has attained wisdom and is often characterized by sound j
 - **State Persistence** - Save and restore agent conversations with code generators for database schemas
 - **Virtual Filesystem** - Isolated, in-memory file operations with optional persistence
 
-**See it in action!** Try the [agents_demo](https://github.com/brainlid/agents_demo) application to experience Sagents interactively, or add the [sagents_live_debugger](https://github.com/brainlid/sagents_live_debugger) to your app for real-time insights into agent configuration, state, and event flows.
+**See it in action!** Try the [agents_demo](https://github.com/sagents-ai/agents_demo) application to experience Sagents interactively, or add the [sagents_live_debugger](https://github.com/sagents-ai/sagents_live_debugger) to your app for real-time insights into agent configuration, state, and event flows.
 
 ## Who Is This For?
 
@@ -287,7 +287,7 @@ end
 
 ## Quick Setup
 
-Sagents provides a single command to scaffold everything you need for conversation-centric agents:
+Sagents provides generators to scaffold everything you need for conversation-centric agents:
 
 ```bash
 mix sagents.setup MyApp.Conversations \
@@ -339,6 +339,48 @@ Manages agent lifecycles at `MyApp.Agents.Coordinator` with:
 - `conversation_agent_id/1` - Change the agent_id mapping strategy
 - `create_conversation_state/1` - Customize state loading behavior
 
+### LiveView Helpers Generator
+
+For Phoenix LiveView integration, generate a helpers module with reusable handlers for all agent events:
+
+```bash
+mix sagents.gen.live_helpers MyAppWeb.AgentLiveHelpers \
+  --context MyApp.Conversations
+```
+
+This generates a module with handler functions that follow the LiveView socket-in/socket-out pattern:
+
+- **Status handlers** - `handle_status_running/1`, `handle_status_idle/1`, `handle_status_cancelled/1`, `handle_status_error/2`, `handle_status_interrupted/2`
+- **Message handlers** - `handle_llm_deltas/2`, `handle_llm_message_complete/1`, `handle_display_messages_batch_saved/2`, `handle_display_message_saved/2`
+- **Tool execution handlers** - `handle_tool_call_identified/2`, `handle_tool_execution_started/2`, `handle_tool_execution_completed/3`, `handle_tool_execution_failed/3`
+- **Lifecycle handlers** - `handle_conversation_title_generated/3`, `handle_agent_shutdown/2`
+- **Core helpers** - `persist_agent_state/2`, `reload_messages_from_db/1`, `update_streaming_message/2`
+
+Use them in your LiveView:
+
+```elixir
+defmodule MyAppWeb.ChatLive do
+  alias MyAppWeb.AgentLiveHelpers
+
+  def handle_info({:agent, {:status_changed, :running, nil}}, socket) do
+    {:noreply, AgentLiveHelpers.handle_status_running(socket)}
+  end
+
+  def handle_info({:agent, {:llm_deltas, deltas}}, socket) do
+    {:noreply, AgentLiveHelpers.handle_llm_deltas(socket, deltas)}
+  end
+
+  def handle_info({:agent, {:status_changed, :idle, _data}}, socket) do
+    {:noreply, AgentLiveHelpers.handle_status_idle(socket)}
+  end
+end
+```
+
+**Options:**
+- `--context` (required) - Your conversations context module
+- `--test-path` - Custom test file directory (default: inferred from module path)
+- `--no-test` - Skip generating the test file
+
 ### Advanced Options
 
 ```bash
@@ -386,26 +428,50 @@ Conversations.save_agent_state(conversation.id, state)
 
 ### Process Architecture
 
-Sagents uses a flexible supervision architecture where components can be scoped independently:
+Sagents uses a flexible supervision architecture built on OTP principles with Registry-based process discovery:
 
 ```
-Application Supervisor
-├── FileSystemSupervisor (DynamicSupervisor)
-│   ├── FileSystemServer ({:user, 1})      # Scoped by user, project, etc.
-│   ├── FileSystemServer ({:user, 2})
-│   └── FileSystemServer ({:project, 42})
+Sagents.Application
+├── Sagents.Registry (keys: :unique)
+│   └── Process Discovery via Registry Keys:
+│       ├── {:agent_supervisor, agent_id}
+│       ├── {:agent_server, agent_id}
+│       ├── {:sub_agents_supervisor, agent_id}
+│       └── {:filesystem_server, scope_key}
 │
-└── AgentsSupervisor (DynamicSupervisor)
-    ├── AgentSupervisor ("conversation-1")
-    │   ├── AgentServer
-    │   └── SubAgentsDynamicSupervisor
-    │       └── SubAgentServer (child agents)
-    │
-    └── AgentSupervisor ("conversation-2")
-        └── ...
+├── AgentsDynamicSupervisor
+│   ├── AgentSupervisor ("conversation-1")
+│   │   ├── AgentServer (registers as {:agent_server, "conversation-1"})
+│   │   │   └── Broadcasts on topic: "agent_server:conversation-1"
+│   │   └── SubAgentsDynamicSupervisor
+│   │       └── SubAgentServer (temporary child agents)
+│   │
+│   └── AgentSupervisor ("conversation-2")
+│       ├── AgentServer
+│       └── SubAgentsDynamicSupervisor
+│
+└── FileSystemSupervisor (independent, flexible scoping)
+    ├── FileSystemServer ({:user, 1})      # User-scoped
+    ├── FileSystemServer ({:user, 2})
+    └── FileSystemServer ({:project, 42})  # Project-scoped
 ```
 
-This separation allows flexible scoping - for example, a project-scoped filesystem shared across multiple conversation-scoped agents. Each agent references its filesystem by scope, not by direct supervision.
+#### Key Design Principles
+
+**Registry-Based Discovery**: All processes register with `Sagents.Registry` using structured tuple keys. Process lookup happens through Registry, not supervision tree traversal. This enables fast, global process discovery.
+
+**Dynamic Agent Lifecycle**: AgentSupervisor instances are started on-demand by the Coordinator via `AgentsDynamicSupervisor.start_agent_sync/1`. The `_sync` variant waits for full registration before returning, preventing race conditions when immediately subscribing to agent events.
+
+**Independent Filesystem Scoping**: FileSystemSupervisor is **separate from agent supervision**, allowing flexible lifetime and scope management:
+- User-scoped filesystem shared across multiple conversations
+- Project-scoped filesystem shared across multiple users
+- Organization-scoped filesystem for team collaboration
+- Agents reference filesystems by `scope_key`, not PID
+
+**Supervision Strategy**: Each AgentSupervisor uses `:rest_for_one` strategy:
+- If AgentServer crashes → SubAgentsDynamicSupervisor restarts
+- If SubAgentsDynamicSupervisor crashes → only it restarts
+- All children use `restart: :temporary` (no automatic restart)
 
 ### Inactivity Timeout
 
@@ -451,10 +517,18 @@ AgentServer broadcasts events on topic `"agent_server:#{agent_id}"`:
 - `{:agent, {:llm_deltas, [%MessageDelta{}]}}` - Streaming tokens
 - `{:agent, {:llm_message, %Message{}}}` - Complete message
 - `{:agent, {:llm_token_usage, %TokenUsage{}}}` - Token usage info
-- `{:agent, {:display_message_saved, display_message}}` - Message persisted
+- `{:agent, {:display_message_saved, display_message}}` - Message persisted (requires `save_new_message_fn` callback)
+- `{:agent, {:display_messages_batch_saved, [display_message]}}` - Batch message persistence
+
+### Tool Events
+- `{:agent, {:tool_call_identified, tool_info}}` - Tool call detected during streaming
+- `{:agent, {:tool_execution_started, tool_info}}` - Tool execution began
+- `{:agent, {:tool_execution_completed, call_id, tool_result}}` - Tool execution succeeded
+- `{:agent, {:tool_execution_failed, call_id, error}}` - Tool execution failed
 
 ### State Events
 - `{:agent, {:todos_updated, todos}}` - TODO list snapshot
+- `{:agent, {:state_restored, new_state}}` - State restored via `update_agent_and_state/3`
 - `{:agent, {:agent_shutdown, metadata}}` - Shutting down
 
 ### Debug Events (separate topic)
@@ -533,6 +607,7 @@ end
 - [PubSub & Presence](docs/pubsub_presence.md) - Real-time events and viewer tracking
 - [Middleware Development](docs/middleware.md) - Building custom middleware
 - [State Persistence](docs/persistence.md) - Saving and restoring conversations
+- [Middleware Messaging](docs/middleware_messaging.md) - Async messaging between middleware and AgentServer
 - [Architecture Overview](docs/architecture.md) - System design and data flow
 
 ## Development

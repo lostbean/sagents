@@ -155,9 +155,12 @@ defmodule Sagents.FileSystem.FileSystemSupervisor do
                 pubsub -> Keyword.put(start_opts, :pubsub, pubsub)
               end
 
-            # Start new filesystem
+            # Start new filesystem Note: The child spec requires the "id" but
+            # the DynamicSupervisor doesn't use it. It does not need to be
+            # unique.
             child_spec = %{
-              id: {:filesystem_server, scope_key},
+              id: FileSystemServer,
+
               start: {FileSystemServer, :start_link, [start_opts]},
               restart: :transient
             }

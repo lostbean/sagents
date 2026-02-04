@@ -94,6 +94,22 @@ defmodule Sagents.AgentSupervisor do
   end
 
   @doc """
+  Get the PID of an AgentSupervisor by agent_id.
+
+  ## Examples
+
+      {:ok, pid} = AgentSupervisor.get_pid("my-agent-1")
+      {:error, :not_found} = AgentSupervisor.get_pid("non-existent")
+  """
+  @spec get_pid(String.t()) :: {:ok, pid()} | {:error, :not_found}
+  def get_pid(agent_id) when is_binary(agent_id) do
+    case Registry.lookup(@registry, {:agent_supervisor, agent_id}) do
+      [{pid, _}] -> {:ok, pid}
+      [] -> {:error, :not_found}
+    end
+  end
+
+  @doc """
   Stop the AgentSupervisor.
 
   ## Examples
@@ -104,12 +120,12 @@ defmodule Sagents.AgentSupervisor do
   """
   @spec stop(String.t(), timeout()) :: :ok | {:error, :not_found}
   def stop(agent_id, timeout \\ 5_000) do
-    case Registry.lookup(@registry, {:agent_supervisor, agent_id}) do
-      [{pid, _}] when is_pid(pid) ->
+    case get_pid(agent_id) do
+      {:ok, pid} ->
         Supervisor.stop(pid, :normal, timeout)
 
-      [] ->
-        {:error, :not_found}
+      {:error, :not_found} = error ->
+        error
     end
   end
 
