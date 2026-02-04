@@ -37,7 +37,7 @@ Add `sagents` to your list of dependencies in `mix.exs`:
 def deps do
   [
     {:sagents, "~> 0.1.0"},
-    {:langchain, "~> 0.4.0"}  # Required peer dependency
+    {:langchain, "~> 0.5.1"}
   ]
 end
 ```
