@@ -4,50 +4,58 @@ defmodule Mix.Tasks.Sagents.Gen.LiveHelpers do
   @moduledoc """
   Generates AgentLiveHelpers module for Phoenix LiveView integration with Sagents.
 
-  This module provides reusable patterns for agent event handling, state persistence,
+  This module provides reusable patterns for agent event handling, state management,
   and UI updates in Phoenix LiveView applications. All functions take a socket and
   return an updated socket, following the LiveView pattern.
 
   ## Examples
 
-      # Basic generation
       mix sagents.gen.live_helpers MyAppWeb.AgentLiveHelpers \\
         --context MyApp.Conversations
-
-      # With all options
-      mix sagents.gen.live_helpers MyAppWeb.AgentLiveHelpers \\
-        --context MyApp.Conversations \\
-        --test-path test/my_app_web/live
 
   ## Generated files
 
     * **Helper module**: Reusable handlers for agent events (status, messages, tools, lifecycle)
-    * **Test file**: Comprehensive test suite with socket mocking
+      and state management helpers (init, load, reset)
 
   ## Options
 
     * `--context` - Your conversations context module (required, e.g., MyApp.Conversations)
-    * `--test-path` - Test file directory (default: inferred from helper module path)
-    * `--no-test` - Skip generating test file
 
   ## Integration
 
-  After generation, use the helpers in your LiveView handlers:
+  After generation, use the helpers in your LiveView:
 
-      @impl true
+      # In mount/3
+      def mount(_params, _session, socket) do
+        {:ok, socket |> AgentLiveHelpers.init_agent_state() |> assign(...)}
+      end
+
+      # In handle_params/3
+      def handle_params(%{"conversation_id" => id}, _uri, socket) do
+        case AgentLiveHelpers.load_conversation(socket, id, scope: ...) do
+          {:ok, socket} -> {:noreply, socket}
+          {:error, socket} -> {:noreply, push_navigate(socket, to: ~p"/chat")}
+        end
+      end
+
+      # In handle_info/2
       def handle_info({:agent, {:status_changed, :running, nil}}, socket) do
         {:noreply, AgentLiveHelpers.handle_status_running(socket)}
       end
 
   See the generated file for complete documentation and usage examples.
+
+  ## Reference Implementation
+
+  See `agents_demo/test/agents_demo_web/live/agent_live_helpers_test.exs` for
+  a comprehensive test suite that you can adapt for your application.
   """
 
   use Mix.Task
 
   @switches [
-    context: :string,
-    test_path: :string,
-    no_test: :boolean
+    context: :string
   ]
 
   @aliases [
@@ -128,7 +136,7 @@ defmodule Mix.Tasks.Sagents.Gen.LiveHelpers do
     end
   end
 
-  defp build_config(helper_module, context_module, opts) do
+  defp build_config(helper_module, context_module, _opts) do
     # Infer application from helper module
     app = infer_app(helper_module)
 
@@ -136,22 +144,13 @@ defmodule Mix.Tasks.Sagents.Gen.LiveHelpers do
       helper_module: helper_module,
       context_module: context_module,
       app: app,
-      app_module: app_module(app),
-      test_path: opts[:test_path] || infer_test_path(helper_module),
-      generate_test: !opts[:no_test]
+      app_module: app_module(app)
     }
   end
 
   defp check_existing_files!(config) do
     # Get list of all files that will be generated
     files_to_generate = [module_to_path(config.helper_module)]
-
-    files_to_generate =
-      if config.generate_test do
-        [test_module_to_path(config.helper_module, config.test_path) | files_to_generate]
-      else
-        files_to_generate
-      end
 
     # Check which files already exist
     existing_files = Enum.filter(files_to_generate, &File.exists?/1)
@@ -185,22 +184,9 @@ defmodule Mix.Tasks.Sagents.Gen.LiveHelpers do
   end
 
   defp generate_files(config) do
-    files = []
-
     # Generate helper module
     helper_file = generate_helper_module(config)
-    files = [helper_file | files]
-
-    # Generate test file if requested
-    files =
-      if config.generate_test do
-        test_file = generate_test_file(config)
-        [test_file | files]
-      else
-        files
-      end
-
-    Enum.reverse(files)
+    [helper_file]
   end
 
   defp generate_helper_module(config) do
@@ -210,11 +196,22 @@ defmodule Mix.Tasks.Sagents.Gen.LiveHelpers do
       |> String.split(".")
       |> List.last()
 
+    # Infer coordinator module from context module
+    # E.g., MyApp.Conversations -> MyApp.Agents.Coordinator
+    coordinator_module = infer_coordinator_module(config.context_module)
+
+    coordinator_alias =
+      coordinator_module
+      |> String.split(".")
+      |> List.last()
+
     # Prepare bindings for helper template
     binding = [
       module: config.helper_module,
       conversations_module: config.context_module,
       conversations_alias: conversations_alias,
+      coordinator_module: coordinator_module,
+      coordinator_alias: coordinator_alias,
       app: config.app
     ]
 
@@ -228,47 +225,6 @@ defmodule Mix.Tasks.Sagents.Gen.LiveHelpers do
     File.write!(helper_path, content)
 
     helper_path
-  end
-
-  defp generate_test_file(config) do
-    # Extract test module name from helper module
-    test_module = "#{config.helper_module}Test"
-
-    # Extract short alias name (e.g., AgentLiveHelpers from AgentsDemoWeb.AgentLiveHelpers)
-    helper_alias =
-      config.helper_module
-      |> String.split(".")
-      |> List.last()
-
-    # Extract short alias for conversations module (e.g., Conversations from AgentsDemo.Conversations)
-    conversations_alias =
-      config.context_module
-      |> String.split(".")
-      |> List.last()
-
-    # Prepare bindings for test template
-    binding = [
-      module: test_module,
-      helper_module: config.helper_module,
-      helper_alias: helper_alias,
-      conversations_module: config.context_module,
-      conversations_alias: conversations_alias,
-      app: config.app,
-      app_web_module: infer_web_module(config.helper_module)
-    ]
-
-    # Load and evaluate template
-    template_path =
-      Application.app_dir(:sagents, "priv/templates/agent_live_helpers_test.exs.eex")
-
-    content = EEx.eval_file(template_path, binding)
-
-    # Write file
-    test_path = test_module_to_path(config.helper_module, config.test_path)
-    File.mkdir_p!(Path.dirname(test_path))
-    File.write!(test_path, content)
-
-    test_path
   end
 
   defp print_generated_files(files) do
@@ -291,56 +247,55 @@ defmodule Mix.Tasks.Sagents.Gen.LiveHelpers do
       Next steps:
 
         1. Review the generated helper module (#{helper_path}):
-           * All handler functions are ready to use
+           * State management helpers (init_agent_state, load_conversation, reset_conversation)
+           * Event handlers for all agent lifecycle events
            * Customize message formatting or error handling as needed
            * The module is hardcoded with your context (#{config.context_module})
 
-        2. Integrate into your LiveView handlers:
+        2. Integrate state management helpers:
 
            defmodule MyAppWeb.ChatLive do
              alias #{config.helper_module}
 
-             @impl true
-             def handle_info({:agent, {:status_changed, :running, nil}}, socket) do
-               {:noreply, AgentLiveHelpers.handle_status_running(socket)}
-             end
-
-             @impl true
-             def handle_info({:agent, {:status_changed, :idle, _data}}, socket) do
-               {:noreply, AgentLiveHelpers.handle_status_idle(socket)}
-             end
-
-             @impl true
-             def handle_info({:agent, {:status_changed, :cancelled, _data}}, socket) do
-               {:noreply, AgentLiveHelpers.handle_status_cancelled(socket)}
-             end
-
-             @impl true
-             def handle_info({:agent, {:status_changed, :error, reason}}, socket) do
-               {:noreply,
+             def mount(_params, _session, socket) do
+               {:ok,
                 socket
-                |> AgentLiveHelpers.handle_status_error(reason)
-                |> push_event("scroll-to-bottom", %{})}
+                |> AgentLiveHelpers.init_agent_state()
+                |> assign(:input, "")
+                # ... other app-specific assigns
+               }
              end
 
-             @impl true
-             def handle_info({:agent, {:llm_deltas, deltas}}, socket) do
-               {:noreply, AgentLiveHelpers.handle_llm_deltas(socket, deltas)}
+             def handle_params(%{"conversation_id" => id}, _uri, socket) do
+               case AgentLiveHelpers.load_conversation(socket, id, scope: ...) do
+                 {:ok, socket} -> {:noreply, socket}
+                 {:error, socket} -> {:noreply, push_navigate(socket, to: ~p"/chat")}
+               end
              end
-
-             # ... other handlers
            end
 
-        3. Run tests to verify everything works:
+        3. Integrate event handlers:
 
-           mix test #{if config.generate_test, do: test_module_to_path(config.helper_module, config.test_path), else: ""}
+           def handle_info({:agent, {:status_changed, :running, nil}}, socket) do
+             {:noreply, AgentLiveHelpers.handle_status_running(socket)}
+           end
+
+           def handle_info({:agent, {:llm_deltas, deltas}}, socket) do
+             {:noreply, AgentLiveHelpers.handle_llm_deltas(socket, deltas)}
+           end
+
+           # ... see generated file for all available handlers
 
       Key features of the generated helpers:
+        - State management: init_agent_state/1, load_conversation/3, reset_conversation/1
         - Status change handlers (running, idle, cancelled, error, interrupted)
         - Message handlers (LLM deltas, message complete, display messages)
         - Tool execution handlers (identified, started, completed, failed)
         - Lifecycle handlers (title generated, agent shutdown)
-        - Core helper functions (persist state, reload messages, create messages)
+
+      Reference implementation:
+        See agents_demo/test/agents_demo_web/live/agent_live_helpers_test.exs
+        for a comprehensive test suite you can adapt for your application.
 
       See the generated file for complete documentation and all available functions.
 
@@ -364,26 +319,6 @@ defmodule Mix.Tasks.Sagents.Gen.LiveHelpers do
     |> Macro.camelize()
   end
 
-  defp infer_web_module(helper_module) do
-    # Extract web module from helper module
-    # e.g., MyAppWeb.AgentLiveHelpers -> MyAppWeb
-    # e.g., AgentsDemoWeb.AgentLiveHelpers -> AgentsDemoWeb
-    helper_module
-    |> String.split(".")
-    |> hd()
-  end
-
-  defp infer_test_path(helper_module) do
-    # Convert module to test path
-    # MyAppWeb.AgentLiveHelpers -> test/my_app_web/live
-    # AgentsDemoWeb.AgentLiveHelpers -> test/agents_demo_web/live
-    parts = String.split(helper_module, ".")
-    {web_parts, _helper_name} = Enum.split(parts, -1)
-
-    web_path = web_parts |> Enum.map(&Macro.underscore/1) |> Path.join()
-    Path.join(["test", web_path, "live"])
-  end
-
   defp module_to_path(module) when is_binary(module) do
     # Convert MyAppWeb.AgentLiveHelpers to lib/my_app_web/live/agent_live_helpers.ex
     parts = String.split(module, ".")
@@ -398,14 +333,12 @@ defmodule Mix.Tasks.Sagents.Gen.LiveHelpers do
     Path.join(["lib", web_path, "live", helper_file])
   end
 
-  defp test_module_to_path(module, test_path) when is_binary(module) do
-    # Get just the last part of the module name
-    module_name =
-      module
-      |> String.split(".")
-      |> List.last()
-      |> Macro.underscore()
+  defp infer_coordinator_module(context_module) do
+    # Convert MyApp.Conversations -> MyApp.Agents.Coordinator
+    # Get base application module (e.g., MyApp from MyApp.Conversations)
+    parts = String.split(context_module, ".")
+    base_module = hd(parts)
 
-    Path.join(test_path, "#{module_name}_test.exs")
+    "#{base_module}.Agents.Coordinator"
   end
 end

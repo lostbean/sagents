@@ -93,6 +93,9 @@ defmodule Mix.Tasks.Sagents.Setup do
 
     # Print instructions
     print_instructions(config)
+
+    # Prompt for LiveView helpers generation
+    prompt_live_helpers(config)
   end
 
   defp parse_context!([context | _]) do
@@ -276,35 +279,6 @@ defmodule Mix.Tasks.Sagents.Setup do
            * Configure HITL in default_interrupt_on/0
            * Change model provider in get_model_config/0 if needed
 
-        4. Integrate into your LiveView:
-
-           defmodule MyAppWeb.ChatLive do
-             alias #{config.coordinator_module}
-
-             def mount(%{"id" => conversation_id}, _session, socket) do
-               # Get #{config.owner_type}_id from session/assigns
-               #{config.owner_type}_id = socket.assigns.current_#{config.owner_type}.id
-               scope = {:#{config.owner_type}, #{config.owner_type}_id}
-
-               if connected?(socket) do
-                 # Subscribe to agent events
-                 Coordinator.ensure_subscribed_to_conversation(conversation_id)
-
-                 # Start agent session with explicit scope
-                 {:ok, session} = Coordinator.start_conversation_session(
-                   conversation_id,
-                   scope: scope
-                 )
-               end
-
-               {:ok, assign(socket, conversation_id: conversation_id)}
-             end
-
-             def handle_info({:agent, event}, socket) do
-               # Handle agent events...
-             end
-           end
-
       Your Sagents infrastructure is configured for:
         - Owner type: :#{config.owner_type}
         - Owner field: #{config.owner_field}
@@ -322,5 +296,52 @@ defmodule Mix.Tasks.Sagents.Setup do
     |> Enum.map(&Macro.underscore/1)
     |> Path.join()
     |> then(&"lib/#{&1}.ex")
+  end
+
+  defp prompt_live_helpers(config) do
+    Mix.shell().info([
+      :cyan,
+      """
+
+      📝 LiveView Integration
+      """
+    ])
+
+    response = Mix.shell().yes?("Would you like to generate LiveView integration helpers?")
+
+    if response do
+      Mix.shell().info("\n#{IO.ANSI.cyan()}Generating LiveView helpers...#{IO.ANSI.reset()}")
+
+      # Build the command
+      web_module = config.web
+      helper_module = "#{web_module}.AgentLiveHelpers"
+
+      # Run the gen.live_helpers task
+      Mix.Task.run("sagents.gen.live_helpers", [
+        helper_module,
+        "--context",
+        config.context_module
+      ])
+    else
+      # Show them how to generate it later
+      web_module = config.web
+      helper_module = "#{web_module}.AgentLiveHelpers"
+
+      Mix.shell().info([
+        :yellow,
+        """
+
+        If you're using Phoenix LiveView, you can generate integration helpers later:
+
+          mix sagents.gen.live_helpers #{helper_module} --context #{config.context_module}
+
+        The AgentLiveHelpers module provides reusable patterns for:
+          - State management (init_agent_state, load_conversation, reset_conversation)
+          - Agent event handling (status changes, messages, tool execution)
+          - Automatic subscription and presence tracking
+
+        """
+      ])
+    end
   end
 end
