@@ -29,6 +29,8 @@ Sagents is designed for Elixir developers building **interactive AI applications
 
 If you're building a simple CLI tool or batch processing pipeline, the core [LangChain](https://github.com/brainlid/langchain) library may be sufficient. Sagents adds the orchestration layer needed for production interactive applications.
 
+**What about non-interactive agents?** Certainly! Sagents works perfectly well for background agents without a UI. You'd simply skip the UI state management helpers and omit middleware like HumanInTheLoop. The agent still runs as a supervised GenServer with all the benefits of state persistence, middleware capabilities, and SubAgent delegation. The [sagents_live_debugger](https://github.com/sagents-ai/sagents_live_debugger) package remains valuable for gaining visibility into what your agents are doing, even without an end-user interface.
+
 ## Installation
 
 Add `sagents` to your list of dependencies in `mix.exs`:

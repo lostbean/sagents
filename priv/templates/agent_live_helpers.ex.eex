@@ -651,7 +651,6 @@ defmodule <%= module %> do
           socket
       end
     else
-      Logger.debug("Skipping state persistence - no conversation_id or agent_id (#{context_label})")
       socket
     end
   end
