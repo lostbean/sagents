@@ -787,15 +787,27 @@ defmodule Sagents.AgentServer do
   @doc """
   Get the current status of the server.
 
-  Returns one of: `:idle`, `:running`, `:interrupted`, `:cancelled`, `:error`
+  Returns one of:
+  - `:idle` - Server ready for work
+  - `:running` - Agent executing
+  - `:interrupted` - Awaiting human decision
+  - `:cancelled` - Execution was cancelled
+  - `:error` - Execution failed
+  - `:not_running` - Agent process does not exist
 
   ## Examples
 
-      status = AgentServer.get_status("my-agent-1")
+      :idle = AgentServer.get_status("my-agent-1")
+      :not_running = AgentServer.get_status("non-existent-agent")
   """
-  @spec get_status(String.t()) :: status()
+  @spec get_status(String.t()) :: status() | :not_running
   def get_status(agent_id) do
-    GenServer.call(get_name(agent_id), :get_status)
+    try do
+      GenServer.call(get_name(agent_id), :get_status)
+    catch
+      :exit, _ ->
+        :not_running
+    end
   end
 
   @doc """

@@ -114,6 +114,35 @@ defmodule Sagents.AgentServerTest do
 
       assert AgentServer.get_status(agent_id) == :idle
     end
+
+    test "returns :not_running when agent process doesn't exist" do
+      # Use an agent_id that was never started
+      non_existent_agent_id = "never-started-#{System.unique_integer([:positive])}"
+
+      assert AgentServer.get_status(non_existent_agent_id) == :not_running
+    end
+
+    test "returns :not_running after agent is stopped" do
+      agent = create_test_agent()
+      agent_id = agent.agent_id
+
+      {:ok, pid} =
+        AgentServer.start_link(
+          agent: agent,
+          name: AgentServer.get_name(agent_id),
+          pubsub: nil
+        )
+
+      # Verify it's running
+      assert AgentServer.get_status(agent_id) == :idle
+
+      # Stop the agent
+      :ok = AgentServer.stop(agent_id)
+      refute Process.alive?(pid)
+
+      # Should now return :not_running
+      assert AgentServer.get_status(agent_id) == :not_running
+    end
   end
 
   describe "get_info/1" do
