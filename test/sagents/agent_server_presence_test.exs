@@ -284,6 +284,14 @@ defmodule Sagents.AgentServerPresenceTest do
       {:ok, make_ref()}
     end
 
+    def update(pid, topic, id, update_fn) when is_function(update_fn, 1) do
+      Elixir.Agent.update(__MODULE__, fn state ->
+        %{state | updates: [{pid, topic, id, update_fn} | state.updates]}
+      end)
+
+      {:ok, make_ref()}
+    end
+
     def untrack(_pid, _topic, _id) do
       :ok
     end
