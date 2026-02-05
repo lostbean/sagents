@@ -76,8 +76,11 @@ state = State.new!(%{
     interval: 30_000  # Every 30 seconds
   ],
 
-  # Display message persistence
-  display_message_callback: &MyApp.save_display_message/2
+  # Message persistence
+  conversation_id: conversation_id,
+  save_new_message_fn: fn conv_id, message ->
+    MyApp.Conversations.save_message(conv_id, message)
+  end
 )
 ```
 

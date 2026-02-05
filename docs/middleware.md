@@ -15,17 +15,17 @@ Middleware is the primary extension mechanism in Sagents. Each middleware can:
 
 ```elixir
 @callback init(opts :: keyword()) :: {:ok, config :: map()} | {:error, reason}
-@callback system_prompt(config :: map()) :: String.t() | nil
+@callback system_prompt(config :: map()) :: String.t() | [String.t()]
 @callback tools(config :: map()) :: [LangChain.Function.t()]
 @callback before_model(state :: State.t(), config :: map()) ::
-  {:ok, State.t()} | {:interrupt, State.t(), interrupt_data :: map()}
+  {:ok, State.t()} | {:interrupt, State.t(), interrupt_data :: map()} | {:error, reason}
 @callback after_model(state :: State.t(), config :: map()) ::
-  {:ok, State.t()} | {:interrupt, State.t(), interrupt_data :: map()}
+  {:ok, State.t()} | {:interrupt, State.t(), interrupt_data :: map()} | {:error, reason}
 @callback handle_message(message :: term(), state :: State.t(), config :: map()) ::
-  {:ok, State.t()}
+  {:ok, State.t()} | {:error, reason}
 @callback on_server_start(state :: State.t(), config :: map()) ::
-  {:ok, State.t()}
-@callback state_schema() :: keyword()
+  {:ok, State.t()} | {:error, reason}
+@callback state_schema() :: module() | nil
 ```
 
 All callbacks are optional with default implementations that pass through unchanged.
@@ -426,7 +426,7 @@ end
 
 ## State Schema
 
-Define what metadata your middleware stores for serialization:
+Define what metadata your middleware stores for serialization by returning a schema module:
 
 ```elixir
 defmodule MyApp.Middleware.Preferences do
@@ -434,14 +434,8 @@ defmodule MyApp.Middleware.Preferences do
 
   @impl true
   def state_schema do
-    [
-      preferences: %{
-        type: :map,
-        default: %{},
-        serialize: &Jason.encode!/1,
-        deserialize: &Jason.decode!/1
-      }
-    ]
+    # Return a module that defines the schema, or nil if no custom serialization needed
+    MyApp.Middleware.Preferences.Schema
   end
 
   @impl true

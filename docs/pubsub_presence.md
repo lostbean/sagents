@@ -185,14 +185,23 @@ end
 ### Tool Events
 
 ```elixir
-# Tool call executed
-{:agent, {:tool_call_executed, %{
-  tool_call: %ToolCall{},
-  result: %ToolResult{}
-}}}
+# Tool call identified (LLM requested a tool)
+{:agent, {:tool_call_identified, tool_info}}
+# tool_info contains: %{call_id, name, display_text, arguments}
 
-# Tool call pending HITL (before interrupt)
-{:agent, {:tool_call_pending, %ToolCall{}}}
+# Tool execution started
+{:agent, {:tool_execution_started, tool_info}}
+# tool_info contains: %{call_id, name, display_text, arguments}
+
+# Tool execution completed successfully
+{:agent, {:tool_execution_completed, call_id, tool_result}}
+# call_id - matches the started event
+# tool_result - %ToolResult{} struct with response
+
+# Tool execution failed
+{:agent, {:tool_execution_failed, call_id, error}}
+# call_id - matches the started event
+# error - error reason or message
 ```
 
 ### Shutdown Event

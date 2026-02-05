@@ -374,7 +374,7 @@ Application Supervisor
 │   ├── FileSystemServer ({:user, 2})
 │   └── FileSystemServer ({:project, 42})  # Can be shared across agents
 │
-└── Sagents.AgentsSupervisor (DynamicSupervisor)
+└── Sagents.AgentsDynamicSupervisor (DynamicSupervisor)
     │
     ├── AgentSupervisor ("conversation-1")
     │   ├── AgentServer

@@ -212,8 +212,9 @@ defmodule MyApp.Agents.Coordinator do
         interval: 30_000,
         on_idle: true
       ],
-      display_message_callback: fn msg ->
-        Conversations.append_display_message(conversation_id, msg)
+      conversation_id: conversation_id,
+      save_new_message_fn: fn conv_id, message ->
+        Conversations.save_message(conv_id, message)
       end
     )
 
@@ -286,13 +287,11 @@ Display messages are a UI-friendly representation of the conversation:
 # Configure callback when starting agent
 AgentServer.start_link(
   agent: agent,
-  display_message_callback: fn role, content, metadata ->
-    Conversations.append_display_message(
-      conversation_id,
-      role,
-      content,
-      metadata
-    )
+  conversation_id: conversation_id,
+  save_new_message_fn: fn conv_id, message ->
+    # This is called for each message (user, assistant, tool)
+    # Returns {:ok, [saved_display_messages]} or {:error, reason}
+    Conversations.save_message(conv_id, message)
   end
 )
 
