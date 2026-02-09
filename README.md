@@ -19,7 +19,7 @@ A sage is a person who has attained wisdom and is often characterized by sound j
 
 ![AgentsDemo Chat Interface](AgentsDemo-Files.png)
 
-*The AgentsDemo chat interface showing the use of a virtual filesystem, tool call execution, composable middleware, supervised Agentic GenServer assistant, and much more!*
+*The [AgentsDemo](https://github.com/sagents-ai/agents_demo) chat interface showing the use of a virtual filesystem, tool call execution, composable middleware, supervised Agentic GenServer assistant, and much more!*
 
 ## Who Is This For?
 
