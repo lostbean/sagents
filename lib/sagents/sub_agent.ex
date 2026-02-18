@@ -718,6 +718,10 @@ defmodule Sagents.SubAgent do
     LLMChain.add_callback(chain, callbacks)
   end
 
+  defp maybe_add_callbacks(chain, callbacks) when is_list(callbacks) do
+    Enum.reduce(callbacks, chain, &LLMChain.add_callback(&2, &1))
+  end
+
   # until_tool execution loop with HITL support
   # Runs the chain in a loop, checking after each tool execution step whether
   # the target tool was called. Returns {:ok, chain, tool_result} on match.
