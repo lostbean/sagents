@@ -554,8 +554,94 @@ defmodule Sagents.Agent do
          opts
        ) do
     callbacks = Keyword.get(opts, :callbacks)
+    interrupt_data = state.interrupt_data || %{}
 
-    # Rebuild chain to access tools and execute tool calls with decisions
+    # Check if this is a sub-agent HITL resume
+    case interrupt_data do
+      %{type: :subagent_hitl} ->
+        execute_subagent_hitl_resume(agent, state, decisions, opts, callbacks, interrupt_data)
+
+      _ ->
+        execute_normal_hitl_resume(agent, state, decisions, opts, callbacks)
+    end
+  end
+
+  # Resume from a sub-agent HITL interrupt.
+  # Injects resume_info into the chain's custom_context so the task tool
+  # can route to resume_subagent instead of start_subagent.
+  defp execute_subagent_hitl_resume(agent, state, decisions, opts, callbacks, interrupt_data) do
+    # Clear interrupt_data from state before building chain so it doesn't
+    # get re-detected by check_for_subagent_interrupt after tool execution
+    state_for_chain = %{state | interrupt_data: nil}
+
+    with {:ok, langchain_messages} <- validate_messages(state.messages),
+         {:ok, chain} <- build_chain(agent, langchain_messages, state_for_chain, callbacks) do
+      # Inject resume_info so the task tool's function can detect resume context
+      resume_info = %{
+        sub_agent_id: interrupt_data.sub_agent_id,
+        subagent_type: interrupt_data.subagent_type,
+        decisions: decisions
+      }
+
+      chain = LLMChain.update_custom_context(chain, %{resume_info: resume_info})
+
+      # Get the assistant message with tool calls
+      assistant_msg =
+        Enum.reverse(state.messages)
+        |> Enum.find(fn msg ->
+          msg.role == :assistant && msg.tool_calls != nil && msg.tool_calls != []
+        end)
+
+      case assistant_msg do
+        nil ->
+          {:error, "No tool calls found in state"}
+
+        %{tool_calls: all_tool_calls} ->
+          # Auto-approve ALL parent tool calls — the task tool handles resume internally
+          full_decisions = Enum.map(all_tool_calls, fn _tc -> %{type: :approve} end)
+
+          updated_chain =
+            LLMChain.execute_tool_calls_with_decisions(chain, all_tool_calls, full_decisions)
+
+          # Update state from tool results (this merges any State deltas)
+          updated_chain_with_state = update_chain_state_from_tools(updated_chain)
+
+          # Check if the sub-agent produced another interrupt during resume
+          case check_for_subagent_interrupt(updated_chain_with_state) do
+            {:interrupt, chain_with_cleared, new_interrupt_data} ->
+              case extract_state_from_chain(chain_with_cleared, state) do
+                {:ok, interrupted_state} ->
+                  {:interrupt, %{interrupted_state | interrupt_data: new_interrupt_data},
+                   new_interrupt_data}
+
+                {:error, reason} ->
+                  {:error, reason}
+              end
+
+            :continue ->
+              # Sub-agent completed — continue normal execution
+              tool_result_message = List.last(updated_chain_with_state.exchanged_messages)
+
+              # Clear interrupt_data from tool result's processed_content so it
+              # doesn't get re-merged in extract_state_from_chain during the
+              # subsequent execute() call
+              cleaned_message = clear_interrupt_from_tool_results(tool_result_message)
+
+              # Clear interrupt_data before continuing
+              state_with_results =
+                state
+                |> State.add_message(cleaned_message)
+                |> Map.put(:interrupt_data, nil)
+
+              execute(agent, state_with_results, opts)
+          end
+      end
+    end
+  end
+
+  # Resume from a normal (non-sub-agent) HITL interrupt.
+  # This is the original logic for parent-level HITL.
+  defp execute_normal_hitl_resume(agent, state, decisions, opts, callbacks) do
     with {:ok, langchain_messages} <- validate_messages(state.messages),
          {:ok, chain} <- build_chain(agent, langchain_messages, state, callbacks) do
       # Get the assistant message with tool calls
@@ -830,13 +916,20 @@ defmodule Sagents.Agent do
         chain_after_tools = LLMChain.execute_tool_calls(chain_after_llm)
         chain_with_updated_state = update_chain_state_from_tools(chain_after_tools)
 
-        # Check if we need to continue (needs_response)
-        if chain_with_updated_state.needs_response do
-          # Continue the loop with updated state
-          execute_chain_with_state_updates(chain_with_updated_state, agent)
-        else
-          # Done
-          {:ok, chain_with_updated_state}
+        # Check for sub-agent interrupt propagated via state
+        case check_for_subagent_interrupt(chain_with_updated_state) do
+          {:interrupt, updated_chain, interrupt_data} ->
+            {:interrupt, updated_chain, interrupt_data}
+
+          :continue ->
+            # Check if we need to continue (needs_response)
+            if chain_with_updated_state.needs_response do
+              # Continue the loop with updated state
+              execute_chain_with_state_updates(chain_with_updated_state, agent)
+            else
+              # Done
+              {:ok, chain_with_updated_state}
+            end
         end
 
       {:error, _chain, %LangChainError{} = reason} ->
@@ -861,22 +954,32 @@ defmodule Sagents.Agent do
           chain_after_tools = LLMChain.execute_tool_calls(chain_after_llm)
           chain_with_updated_state = update_chain_state_from_tools(chain_after_tools)
 
-          case AgentUtils.find_matching_tool_result(chain_with_updated_state, until_tool_names) do
-            {:found, tool_result} ->
-              {:ok, chain_with_updated_state, tool_result}
+          # Check for sub-agent interrupt propagated via state
+          case check_for_subagent_interrupt(chain_with_updated_state) do
+            {:interrupt, updated_chain, interrupt_data} ->
+              {:interrupt, updated_chain, interrupt_data}
 
-            :not_found ->
-              if chain_with_updated_state.needs_response do
-                execute_chain_until_tool(
-                  chain_with_updated_state,
-                  agent,
-                  until_tool_names,
-                  max_runs,
-                  run_count + 1
-                )
-              else
-                {:error,
-                 "until_tool: LLM completed without calling target tool(s): #{inspect(until_tool_names)}"}
+            :continue ->
+              case AgentUtils.find_matching_tool_result(
+                     chain_with_updated_state,
+                     until_tool_names
+                   ) do
+                {:found, tool_result} ->
+                  {:ok, chain_with_updated_state, tool_result}
+
+                :not_found ->
+                  if chain_with_updated_state.needs_response do
+                    execute_chain_until_tool(
+                      chain_with_updated_state,
+                      agent,
+                      until_tool_names,
+                      max_runs,
+                      run_count + 1
+                    )
+                  else
+                    {:error,
+                     "until_tool: LLM completed without calling target tool(s): #{inspect(until_tool_names)}"}
+                  end
               end
           end
 
@@ -914,26 +1017,33 @@ defmodule Sagents.Agent do
               chain_after_tools = LLMChain.execute_tool_calls(chain_after_llm)
               chain_with_updated_state = update_chain_state_from_tools(chain_after_tools)
 
-              case AgentUtils.find_matching_tool_result(
-                     chain_with_updated_state,
-                     until_tool_names
-                   ) do
-                {:found, tool_result} ->
-                  {:ok, chain_with_updated_state, tool_result}
+              # Check for sub-agent interrupt propagated via state
+              case check_for_subagent_interrupt(chain_with_updated_state) do
+                {:interrupt, updated_chain, interrupt_data} ->
+                  {:interrupt, updated_chain, interrupt_data}
 
-                :not_found ->
-                  if chain_with_updated_state.needs_response do
-                    execute_chain_until_tool_with_hitl(
-                      chain_with_updated_state,
-                      middleware,
-                      agent,
-                      until_tool_names,
-                      max_runs,
-                      run_count + 1
-                    )
-                  else
-                    {:error,
-                     "until_tool: LLM completed without calling target tool(s): #{inspect(until_tool_names)}"}
+                :continue ->
+                  case AgentUtils.find_matching_tool_result(
+                         chain_with_updated_state,
+                         until_tool_names
+                       ) do
+                    {:found, tool_result} ->
+                      {:ok, chain_with_updated_state, tool_result}
+
+                    :not_found ->
+                      if chain_with_updated_state.needs_response do
+                        execute_chain_until_tool_with_hitl(
+                          chain_with_updated_state,
+                          middleware,
+                          agent,
+                          until_tool_names,
+                          max_runs,
+                          run_count + 1
+                        )
+                      else
+                        {:error,
+                         "until_tool: LLM completed without calling target tool(s): #{inspect(until_tool_names)}"}
+                      end
                   end
               end
           end
@@ -952,7 +1062,7 @@ defmodule Sagents.Agent do
     # 1. Call LLM to get a response
     # 2. Check if response contains tool calls that need approval
     # 3. If yes, return interrupt WITHOUT executing tools
-    # 4. If no, execute tools, update state, and continue loop
+    # 4. If no, execute tools, update state, check for sub-agent interrupts, and continue loop
 
     run_opts = build_run_options(agent)
 
@@ -969,13 +1079,20 @@ defmodule Sagents.Agent do
             chain_after_tools = LLMChain.execute_tool_calls(chain_after_llm)
             chain_with_updated_state = update_chain_state_from_tools(chain_after_tools)
 
-            # Check if we need to continue (needs_response)
-            if chain_with_updated_state.needs_response do
-              # Continue the loop with updated state
-              execute_chain_with_hitl(chain_with_updated_state, middleware, agent)
-            else
-              # Done
-              {:ok, chain_with_updated_state}
+            # Check for sub-agent interrupt propagated via state
+            case check_for_subagent_interrupt(chain_with_updated_state) do
+              {:interrupt, updated_chain, interrupt_data} ->
+                {:interrupt, updated_chain, interrupt_data}
+
+              :continue ->
+                # Check if we need to continue (needs_response)
+                if chain_with_updated_state.needs_response do
+                  # Continue the loop with updated state
+                  execute_chain_with_hitl(chain_with_updated_state, middleware, agent)
+                else
+                  # Done
+                  {:ok, chain_with_updated_state}
+                end
             end
         end
 
@@ -1077,6 +1194,54 @@ defmodule Sagents.Agent do
           |> Enum.map(& &1.processed_content)
       end
     end)
+  end
+
+  # Clear interrupt_data from a tool result message's processed_content.
+  # This prevents the interrupt State delta from being re-merged when the
+  # message is processed by extract_state_from_chain in a subsequent execute() call.
+  defp clear_interrupt_from_tool_results(%LangChain.Message{tool_results: nil} = msg), do: msg
+
+  defp clear_interrupt_from_tool_results(%LangChain.Message{tool_results: results} = msg) do
+    cleaned_results =
+      Enum.map(results, fn result ->
+        case result.processed_content do
+          %State{interrupt_data: interrupt_data} when not is_nil(interrupt_data) ->
+            %{result | processed_content: %{result.processed_content | interrupt_data: nil}}
+
+          _ ->
+            result
+        end
+      end)
+
+    %{msg | tool_results: cleaned_results}
+  end
+
+  # Sub-agent HITL interrupt detection
+  #
+  # After tool execution, check if a sub-agent propagated an interrupt via
+  # State.interrupt_data in the chain's custom_context. This happens when the
+  # task tool returns {:ok, message, %State{interrupt_data: ...}} which flows
+  # through ToolResult.processed_content → update_chain_state_from_tools →
+  # State.merge_states.
+  #
+  # Known limitation: If multiple sub-agents run in parallel (the task tool has
+  # async: true) and more than one hits a HITL interrupt, only the last interrupt
+  # survives because State.merge_states right-biases interrupt_data. The other
+  # sub-agent's SubAgentServer will remain stuck in :interrupted state.
+  # Supporting parallel sub-agent interrupts would require collecting interrupts
+  # as a list, which is a larger architectural change. For now, parallel
+  # sub-agent HITL interrupts are an unsupported edge case.
+  defp check_for_subagent_interrupt(chain) do
+    case chain.custom_context do
+      %{state: %State{interrupt_data: %{type: :subagent_hitl} = data}} ->
+        # Clear interrupt_data from state to prevent re-triggering on next loop
+        cleared_state = %{chain.custom_context.state | interrupt_data: nil}
+        updated_chain = LLMChain.update_custom_context(chain, %{state: cleared_state})
+        {:interrupt, updated_chain, data}
+
+      _ ->
+        :continue
+    end
   end
 
   # HITL (Human-in-the-Loop) helper functions
