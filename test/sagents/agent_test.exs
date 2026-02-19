@@ -493,4 +493,433 @@ defmodule Sagents.AgentTest do
       assert agent.before_fallback == nil
     end
   end
+
+  describe "sub-agent HITL interrupt propagation" do
+    @describetag timeout: 15_000
+
+    setup do
+      # Mock ChatAnthropic.call - the actual LLM won't be called for these tests
+      stub(ChatAnthropic, :call, fn _model, _messages, _tools ->
+        {:ok, [Message.new_assistant!("Mock response")]}
+      end)
+
+      :ok
+    end
+
+    test "execution loop detects sub-agent interrupt propagated via state" do
+      # Create a tool that simulates a sub-agent returning an interrupt via 3-tuple
+      # This is what execute_subagent will return after the fix
+      interrupt_tool =
+        LangChain.Function.new!(%{
+          name: "task",
+          description: "Delegate task to sub-agent",
+          function: fn _args, _context ->
+            {:ok, "SubAgent paused — awaiting user input.",
+             %State{
+               interrupt_data: %{
+                 type: :subagent_hitl,
+                 sub_agent_id: "sub-123",
+                 subagent_type: "researcher",
+                 interrupt_data: %{
+                   action_requests: [
+                     %{
+                       tool_call_id: "call_1",
+                       tool_name: "ask_user",
+                       arguments: %{"question" => "Proceed?"}
+                     }
+                   ],
+                   review_configs: %{
+                     "ask_user" => %{allowed_decisions: [:approve, :reject]}
+                   },
+                   hitl_tool_call_ids: ["call_1"]
+                 }
+               }
+             }}
+          end
+        })
+
+      {:ok, agent} =
+        Agent.new(
+          %{
+            model: mock_model(),
+            tools: [interrupt_tool],
+            middleware: []
+          },
+          replace_default_middleware: true
+        )
+
+      # Mock the LLM to return a tool call for "task"
+      tool_call =
+        LangChain.Message.ToolCall.new!(%{
+          call_id: "tc_1",
+          name: "task",
+          arguments: %{"instructions" => "research", "subagent_type" => "researcher"}
+        })
+
+      call_count = :counters.new(1, [:atomics])
+
+      stub(ChatAnthropic, :call, fn _model, _messages, _tools ->
+        :counters.add(call_count, 1, 1)
+        count = :counters.get(call_count, 1)
+
+        if count == 1 do
+          {:ok, [Message.new_assistant!(%{tool_calls: [tool_call]})]}
+        else
+          # Safety: prevent infinite loop in case fix isn't applied
+          {:ok, [Message.new_assistant!("Fallback response")]}
+        end
+      end)
+
+      state = State.new!(%{messages: [Message.new_user!("Research something")]})
+
+      # After the fix, the execution loop should detect the interrupt_data
+      # in the state after tool execution and return {:interrupt, state, interrupt_data}
+      result = Agent.execute(agent, state)
+
+      assert {:interrupt, interrupted_state, interrupt_data} = result
+      assert interrupt_data.type == :subagent_hitl
+      assert interrupt_data.sub_agent_id == "sub-123"
+      assert interrupted_state.interrupt_data == interrupt_data
+    end
+
+    test "execution loop with HITL middleware detects sub-agent interrupt after tool execution" do
+      # Same as above but with HITL middleware active on the parent.
+      # The parent's HITL doesn't match "task" tool, but sub-agent propagates interrupt.
+      interrupt_tool =
+        LangChain.Function.new!(%{
+          name: "task",
+          description: "Delegate task to sub-agent",
+          function: fn _args, _context ->
+            {:ok, "SubAgent paused — awaiting user input.",
+             %State{
+               interrupt_data: %{
+                 type: :subagent_hitl,
+                 sub_agent_id: "sub-456",
+                 subagent_type: "coder",
+                 interrupt_data: %{
+                   action_requests: [
+                     %{
+                       tool_call_id: "call_x",
+                       tool_name: "write_file",
+                       arguments: %{"path" => "/tmp/test.txt"}
+                     }
+                   ],
+                   review_configs: %{
+                     "write_file" => %{allowed_decisions: [:approve, :reject]}
+                   },
+                   hitl_tool_call_ids: ["call_x"]
+                 }
+               }
+             }}
+          end
+        })
+
+      {:ok, agent} =
+        Agent.new(
+          %{
+            model: mock_model(),
+            tools: [interrupt_tool],
+            middleware: []
+          },
+          replace_default_middleware: true,
+          # HITL on "delete_file" only — "task" is not in interrupt_on
+          interrupt_on: %{"delete_file" => true}
+        )
+
+      tool_call =
+        LangChain.Message.ToolCall.new!(%{
+          call_id: "tc_2",
+          name: "task",
+          arguments: %{"instructions" => "write code", "subagent_type" => "coder"}
+        })
+
+      call_count = :counters.new(1, [:atomics])
+
+      stub(ChatAnthropic, :call, fn _model, _messages, _tools ->
+        :counters.add(call_count, 1, 1)
+        count = :counters.get(call_count, 1)
+
+        if count == 1 do
+          {:ok, [Message.new_assistant!(%{tool_calls: [tool_call]})]}
+        else
+          {:ok, [Message.new_assistant!("Fallback response")]}
+        end
+      end)
+
+      state = State.new!(%{messages: [Message.new_user!("Write some code")]})
+
+      result = Agent.execute(agent, state)
+
+      # The HITL check (pre-tool) passes "task" since it's not in interrupt_on.
+      # But after tool execution, check_for_subagent_interrupt should catch it.
+      assert {:interrupt, interrupted_state, interrupt_data} = result
+      assert interrupt_data.type == :subagent_hitl
+      assert interrupt_data.sub_agent_id == "sub-456"
+      assert interrupted_state.interrupt_data == interrupt_data
+    end
+
+    test "resume routes decisions to sub-agent via resume_info in context" do
+      # This test verifies that when resuming from a sub-agent HITL interrupt,
+      # the parent injects resume_info into the tool context so the task tool
+      # can route to resume_subagent instead of start_subagent.
+
+      call_log = :ets.new(:call_log, [:set, :public])
+
+      subagent_task_tool =
+        LangChain.Function.new!(%{
+          name: "task",
+          description: "Delegate task to sub-agent",
+          function: fn _args, context ->
+            # Record what context was passed — specifically resume_info
+            :ets.insert(call_log, {:resume_info, Map.get(context, :resume_info)})
+
+            # Simulate sub-agent completing after resume
+            {:ok, "Sub-agent completed the task successfully."}
+          end
+        })
+
+      # The parent needs HITL middleware for resume/4 to work.
+      # When using replace_default_middleware, we must add HITL explicitly.
+      {:ok, agent} =
+        Agent.new(
+          %{
+            model: mock_model(),
+            tools: [subagent_task_tool],
+            middleware: [
+              {Sagents.Middleware.HumanInTheLoop, [interrupt_on: %{"task" => true}]}
+            ]
+          },
+          replace_default_middleware: true
+        )
+
+      # Build a state that looks like we were interrupted by a sub-agent HITL
+      tool_call =
+        LangChain.Message.ToolCall.new!(%{
+          call_id: "tc_resume",
+          name: "task",
+          arguments: %{"instructions" => "do work", "subagent_type" => "researcher"}
+        })
+
+      interrupted_state =
+        State.new!(%{
+          messages: [
+            Message.new_user!("Do the work"),
+            Message.new_assistant!(%{tool_calls: [tool_call]})
+          ],
+          interrupt_data: %{
+            type: :subagent_hitl,
+            sub_agent_id: "sub-789",
+            subagent_type: "researcher",
+            interrupt_data: %{
+              action_requests: [
+                %{
+                  tool_call_id: "call_sa",
+                  tool_name: "ask_user",
+                  arguments: %{"question" => "OK?"}
+                }
+              ],
+              review_configs: %{"ask_user" => %{allowed_decisions: [:approve]}},
+              hitl_tool_call_ids: ["call_sa"]
+            },
+            # This marks the parent's "task" tool call as needing HITL handling
+            action_requests: [
+              %{
+                tool_call_id: "tc_resume",
+                tool_name: "task",
+                arguments: %{"instructions" => "do work", "subagent_type" => "researcher"}
+              }
+            ],
+            hitl_tool_call_ids: ["tc_resume"]
+          }
+        })
+
+      # Mock LLM for the continuation after resume
+      stub(ChatAnthropic, :call, fn _model, _messages, _tools ->
+        {:ok, [Message.new_assistant!("Great, the sub-agent finished.")]}
+      end)
+
+      decisions = [%{type: :approve}]
+
+      result = Agent.resume(agent, interrupted_state, decisions)
+
+      # Should succeed
+      assert {:ok, _final_state} = result
+
+      # The tool function should have received resume_info in its context
+      [{:resume_info, resume_info}] = :ets.lookup(call_log, :resume_info)
+      assert resume_info.sub_agent_id == "sub-789"
+      assert resume_info.subagent_type == "researcher"
+      assert resume_info.decisions == decisions
+
+      :ets.delete(call_log)
+    end
+
+    test "parallel tool calls where one returns sub-agent interrupt and one completes normally" do
+      # Create a tool that simulates a sub-agent returning an interrupt via 3-tuple
+      interrupt_tool =
+        LangChain.Function.new!(%{
+          name: "task",
+          description: "Delegate task to sub-agent",
+          async: true,
+          function: fn _args, _context ->
+            {:ok, "SubAgent paused — awaiting user input.",
+             %State{
+               interrupt_data: %{
+                 type: :subagent_hitl,
+                 sub_agent_id: "sub-parallel-1",
+                 subagent_type: "researcher",
+                 interrupt_data: %{
+                   action_requests: [
+                     %{
+                       tool_call_id: "call_sa_1",
+                       tool_name: "ask_user",
+                       arguments: %{"question" => "Proceed with research?"}
+                     }
+                   ],
+                   review_configs: %{
+                     "ask_user" => %{allowed_decisions: [:approve, :reject]}
+                   },
+                   hitl_tool_call_ids: ["call_sa_1"]
+                 }
+               }
+             }}
+          end
+        })
+
+      # A normal tool that completes successfully
+      read_file_tool =
+        LangChain.Function.new!(%{
+          name: "read_file",
+          description: "Read a file",
+          async: true,
+          function: fn _args, _context ->
+            {:ok, "file contents: hello world"}
+          end
+        })
+
+      {:ok, agent} =
+        Agent.new(
+          %{
+            model: mock_model(),
+            tools: [interrupt_tool, read_file_tool],
+            middleware: []
+          },
+          replace_default_middleware: true
+        )
+
+      # Mock the LLM to return both tool calls at once (parallel)
+      task_tool_call =
+        LangChain.Message.ToolCall.new!(%{
+          call_id: "tc_task",
+          name: "task",
+          arguments: %{"instructions" => "research topic", "subagent_type" => "researcher"}
+        })
+
+      read_tool_call =
+        LangChain.Message.ToolCall.new!(%{
+          call_id: "tc_read",
+          name: "read_file",
+          arguments: %{"path" => "/tmp/test.txt"}
+        })
+
+      call_count = :counters.new(1, [:atomics])
+
+      stub(ChatAnthropic, :call, fn _model, _messages, _tools ->
+        :counters.add(call_count, 1, 1)
+        count = :counters.get(call_count, 1)
+
+        if count == 1 do
+          {:ok, [Message.new_assistant!(%{tool_calls: [task_tool_call, read_tool_call]})]}
+        else
+          {:ok, [Message.new_assistant!("Fallback response")]}
+        end
+      end)
+
+      state = State.new!(%{messages: [Message.new_user!("Research and read")]})
+
+      result = Agent.execute(agent, state)
+
+      # The agent should detect the sub-agent interrupt and return it
+      assert {:interrupt, interrupted_state, interrupt_data} = result
+      assert interrupt_data.type == :subagent_hitl
+      assert interrupt_data.sub_agent_id == "sub-parallel-1"
+
+      # The normal tool's result should also be present in the state messages.
+      # After tool execution, a tool result message is added containing results
+      # from both tool calls. Look for the read_file result in the messages.
+      tool_messages =
+        interrupted_state.messages
+        |> Enum.filter(&(&1.role == :tool))
+
+      assert length(tool_messages) > 0
+
+      # Find tool results that contain the read_file output
+      all_tool_results =
+        tool_messages
+        |> Enum.flat_map(fn msg -> msg.tool_results || [] end)
+
+      read_file_result =
+        Enum.find(all_tool_results, fn tr ->
+          tr.name == "read_file"
+        end)
+
+      assert read_file_result != nil
+
+      result_content =
+        LangChain.Message.ContentPart.content_to_string(read_file_result.content)
+
+      assert result_content =~ "file contents: hello world"
+    end
+
+    test "no interrupt when sub-agent completes normally (state has no interrupt_data)" do
+      # Verify that normal tool execution (no interrupt_data in state) still works
+      normal_tool =
+        LangChain.Function.new!(%{
+          name: "task",
+          description: "Delegate task to sub-agent",
+          function: fn _args, _context ->
+            # Normal completion — no 3-tuple, just {:ok, result}
+            {:ok, "Sub-agent completed successfully."}
+          end
+        })
+
+      {:ok, agent} =
+        Agent.new(
+          %{
+            model: mock_model(),
+            tools: [normal_tool],
+            middleware: []
+          },
+          replace_default_middleware: true
+        )
+
+      tool_call =
+        LangChain.Message.ToolCall.new!(%{
+          call_id: "tc_normal",
+          name: "task",
+          arguments: %{"instructions" => "simple task", "subagent_type" => "general-purpose"}
+        })
+
+      call_count = :counters.new(1, [:atomics])
+
+      stub(ChatAnthropic, :call, fn _model, _messages, _tools ->
+        :counters.add(call_count, 1, 1)
+        count = :counters.get(call_count, 1)
+
+        if count == 1 do
+          {:ok, [Message.new_assistant!(%{tool_calls: [tool_call]})]}
+        else
+          {:ok, [Message.new_assistant!("Done!")]}
+        end
+      end)
+
+      state = State.new!(%{messages: [Message.new_user!("Do a task")]})
+
+      result = Agent.execute(agent, state)
+
+      # Should complete normally, not interrupt
+      assert {:ok, final_state} = result
+      assert final_state.interrupt_data == nil
+    end
+  end
 end
