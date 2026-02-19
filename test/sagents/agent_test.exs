@@ -921,5 +921,82 @@ defmodule Sagents.AgentTest do
       assert {:ok, final_state} = result
       assert final_state.interrupt_data == nil
     end
+
+    test "resume with subagent_hitl works when parent has empty interrupt_on" do
+      # This reproduces the real-world scenario where the bug manifests:
+      # - Parent orchestrator has HITL middleware but interrupt_on: %{}
+      #   (it doesn't interrupt on "task" — only sub-agents have their own interrupt_on)
+      # - Sub-agent triggers an HITL interrupt (e.g., ask_user)
+      # - interrupt_data has type: :subagent_hitl with NO parent-level hitl_tool_call_ids
+      #
+      # BUG: Agent.resume/4 calls process_decisions which extracts
+      # hitl_tool_call_ids from the top-level interrupt_data. Since subagent_hitl
+      # interrupt_data has no parent-level hitl_tool_call_ids, it defaults to [],
+      # and validation fails: "Decision count (1) does not match HITL tool count (0)"
+
+      subagent_task_tool =
+        LangChain.Function.new!(%{
+          name: "task",
+          description: "Delegate task to sub-agent",
+          function: fn _args, _context ->
+            {:ok, "Sub-agent completed the task successfully."}
+          end
+        })
+
+      # Empty interrupt_on — parent doesn't interrupt on any tools
+      {:ok, agent} =
+        Agent.new(
+          %{
+            model: mock_model(),
+            tools: [subagent_task_tool],
+            middleware: [
+              {Sagents.Middleware.HumanInTheLoop, [interrupt_on: %{}]}
+            ]
+          },
+          replace_default_middleware: true
+        )
+
+      tool_call =
+        LangChain.Message.ToolCall.new!(%{
+          call_id: "tc_1",
+          name: "task",
+          arguments: %{"instructions" => "do work", "subagent_type" => "modeling"}
+        })
+
+      # Sub-agent interrupt_data — NO parent-level hitl_tool_call_ids or action_requests.
+      # This is what real sub-agent interrupts look like when propagated up.
+      interrupted_state =
+        State.new!(%{
+          messages: [
+            Message.new_user!("Do the work"),
+            Message.new_assistant!(%{tool_calls: [tool_call]})
+          ],
+          interrupt_data: %{
+            type: :subagent_hitl,
+            sub_agent_id: "sub-1",
+            subagent_type: "modeling",
+            interrupt_data: %{
+              action_requests: [
+                %{
+                  tool_call_id: "call_sa",
+                  tool_name: "ask_user",
+                  arguments: %{"question" => "Is this OK?"}
+                }
+              ],
+              review_configs: %{"ask_user" => %{allowed_decisions: [:approve]}},
+              hitl_tool_call_ids: ["call_sa"]
+            }
+          }
+        })
+
+      stub(ChatAnthropic, :call, fn _model, _messages, _tools ->
+        {:ok, [Message.new_assistant!("Great, done.")]}
+      end)
+
+      # Without the fix: {:error, "Decision count (1) does not match HITL tool count (0)"}
+      # With the fix: {:ok, _final_state}
+      result = Agent.resume(agent, interrupted_state, [%{type: :approve}])
+      assert {:ok, _final_state} = result
+    end
   end
 end

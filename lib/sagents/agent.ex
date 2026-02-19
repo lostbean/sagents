@@ -505,19 +505,22 @@ defmodule Sagents.Agent do
         {:error, "Agent does not have HumanInTheLoop middleware configured"}
 
       %MiddlewareEntry{module: module, config: config} ->
-        # Validate decisions first
-        case module.process_decisions(state, decisions, config) do
-          {:ok, ^state} ->
-            # Validation passed, now execute the approved/edited tools
-            execute_approved_tools_and_update_state(
-              agent,
-              state,
-              decisions,
-              opts
-            )
+        interrupt_data = state.interrupt_data || %{}
 
-          {:error, reason} ->
-            {:error, reason}
+        if Map.get(interrupt_data, :type) == :subagent_hitl do
+          # Sub-agent HITL decisions are validated by the sub-agent, not the parent.
+          # Skip parent-level process_decisions which would fail because there are
+          # no parent-level hitl_tool_call_ids to match against.
+          execute_approved_tools_and_update_state(agent, state, decisions, opts)
+        else
+          # Normal HITL: validate decisions against parent-level interrupt_data
+          case module.process_decisions(state, decisions, config) do
+            {:ok, ^state} ->
+              execute_approved_tools_and_update_state(agent, state, decisions, opts)
+
+            {:error, reason} ->
+              {:error, reason}
+          end
         end
     end
   end
