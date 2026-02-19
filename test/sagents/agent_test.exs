@@ -998,5 +998,558 @@ defmodule Sagents.AgentTest do
       result = Agent.resume(agent, interrupted_state, [%{type: :approve}])
       assert {:ok, _final_state} = result
     end
+
+    test "resume with wrong decision count for sub-agent HITL still proceeds (parent skips validation)" do
+      # When a sub-agent HITL interrupt has 2 action_requests but the user provides
+      # only 1 decision (or 3 decisions), the parent skips process_decisions for
+      # subagent_hitl type. The mismatch is between the decisions list and the
+      # sub-agent's expectations — the parent doesn't validate this because it
+      # auto-approves all parent-level tool calls and passes decisions through
+      # to the sub-agent via resume_info in the tool context.
+
+      call_log = :ets.new(:decision_count_log, [:set, :public])
+
+      subagent_task_tool =
+        LangChain.Function.new!(%{
+          name: "task",
+          description: "Delegate task to sub-agent",
+          function: fn _args, context ->
+            # Record what decisions were passed via resume_info
+            resume_info = Map.get(context, :resume_info)
+            :ets.insert(call_log, {:decisions, resume_info && resume_info.decisions})
+            {:ok, "Sub-agent completed."}
+          end
+        })
+
+      {:ok, agent} =
+        Agent.new(
+          %{
+            model: mock_model(),
+            tools: [subagent_task_tool],
+            middleware: [
+              {Sagents.Middleware.HumanInTheLoop, [interrupt_on: %{}]}
+            ]
+          },
+          replace_default_middleware: true
+        )
+
+      tool_call =
+        LangChain.Message.ToolCall.new!(%{
+          call_id: "tc_mismatch",
+          name: "task",
+          arguments: %{"instructions" => "do work", "subagent_type" => "modeling"}
+        })
+
+      # Interrupt data with 2 action_requests in the nested sub-agent interrupt_data
+      interrupted_state =
+        State.new!(%{
+          messages: [
+            Message.new_user!("Do the work"),
+            Message.new_assistant!(%{tool_calls: [tool_call]})
+          ],
+          interrupt_data: %{
+            type: :subagent_hitl,
+            sub_agent_id: "sub-mismatch",
+            subagent_type: "modeling",
+            interrupt_data: %{
+              action_requests: [
+                %{
+                  tool_call_id: "call_sa_1",
+                  tool_name: "ask_user",
+                  arguments: %{"question" => "Q1?"}
+                },
+                %{
+                  tool_call_id: "call_sa_2",
+                  tool_name: "write_file",
+                  arguments: %{"path" => "/tmp/x"}
+                }
+              ],
+              review_configs: %{
+                "ask_user" => %{allowed_decisions: [:approve]},
+                "write_file" => %{allowed_decisions: [:approve, :reject]}
+              },
+              hitl_tool_call_ids: ["call_sa_1", "call_sa_2"]
+            }
+          }
+        })
+
+      stub(ChatAnthropic, :call, fn _model, _messages, _tools ->
+        {:ok, [Message.new_assistant!("Done.")]}
+      end)
+
+      # Provide only 1 decision for 2 action_requests — parent doesn't validate this.
+      # The parent auto-approves its own "task" tool call and passes the decisions
+      # list through resume_info to the sub-agent. The sub-agent would be responsible
+      # for validating decision count, but in this test the tool function just succeeds.
+      result = Agent.resume(agent, interrupted_state, [%{type: :approve}])
+
+      # The parent-level resume succeeds because:
+      # 1. subagent_hitl type skips process_decisions (no parent-level validation)
+      # 2. The task tool function receives the decisions via resume_info and completes
+      assert {:ok, _final_state} = result
+
+      # Verify the mismatched decisions were indeed passed through
+      [{:decisions, passed_decisions}] = :ets.lookup(call_log, :decisions)
+      assert length(passed_decisions) == 1
+
+      :ets.delete(call_log)
+
+      # Now test with too many decisions (3 decisions for 2 action_requests)
+      call_log2 = :ets.new(:decision_count_log2, [:set, :public])
+
+      subagent_task_tool2 =
+        LangChain.Function.new!(%{
+          name: "task",
+          description: "Delegate task to sub-agent",
+          function: fn _args, context ->
+            resume_info = Map.get(context, :resume_info)
+            :ets.insert(call_log2, {:decisions, resume_info && resume_info.decisions})
+            {:ok, "Sub-agent completed."}
+          end
+        })
+
+      {:ok, agent2} =
+        Agent.new(
+          %{
+            model: mock_model(),
+            tools: [subagent_task_tool2],
+            middleware: [
+              {Sagents.Middleware.HumanInTheLoop, [interrupt_on: %{}]}
+            ]
+          },
+          replace_default_middleware: true
+        )
+
+      result2 =
+        Agent.resume(agent2, interrupted_state, [
+          %{type: :approve},
+          %{type: :reject},
+          %{type: :approve}
+        ])
+
+      assert {:ok, _final_state} = result2
+
+      [{:decisions, passed_decisions2}] = :ets.lookup(call_log2, :decisions)
+      assert length(passed_decisions2) == 3
+
+      :ets.delete(call_log2)
+    end
+
+    test "resume with subagent_hitl returns error when no assistant message with tool calls exists" do
+      # State has interrupt_data with type: :subagent_hitl but no assistant message
+      # with tool_calls. The execute_subagent_hitl_resume function searches for the
+      # last assistant message with tool_calls and returns an error if none is found.
+
+      subagent_task_tool =
+        LangChain.Function.new!(%{
+          name: "task",
+          description: "Delegate task to sub-agent",
+          function: fn _args, _context -> {:ok, "done"} end
+        })
+
+      {:ok, agent} =
+        Agent.new(
+          %{
+            model: mock_model(),
+            tools: [subagent_task_tool],
+            middleware: [
+              {Sagents.Middleware.HumanInTheLoop, [interrupt_on: %{}]}
+            ]
+          },
+          replace_default_middleware: true
+        )
+
+      # State with interrupt_data but only a user message — no assistant message with tool_calls
+      state_no_tool_calls =
+        State.new!(%{
+          messages: [
+            Message.new_user!("Do the work")
+          ],
+          interrupt_data: %{
+            type: :subagent_hitl,
+            sub_agent_id: "sub-no-tools",
+            subagent_type: "modeling",
+            interrupt_data: %{
+              action_requests: [
+                %{
+                  tool_call_id: "call_sa",
+                  tool_name: "ask_user",
+                  arguments: %{"question" => "OK?"}
+                }
+              ],
+              review_configs: %{"ask_user" => %{allowed_decisions: [:approve]}},
+              hitl_tool_call_ids: ["call_sa"]
+            }
+          }
+        })
+
+      result = Agent.resume(agent, state_no_tool_calls, [%{type: :approve}])
+      assert {:error, "No tool calls found in state"} = result
+
+      # Also test with an assistant message that has NO tool_calls (empty list)
+      state_empty_tool_calls =
+        State.new!(%{
+          messages: [
+            Message.new_user!("Do the work"),
+            Message.new_assistant!("I'll help you with that.")
+          ],
+          interrupt_data: %{
+            type: :subagent_hitl,
+            sub_agent_id: "sub-empty-tools",
+            subagent_type: "modeling",
+            interrupt_data: %{
+              action_requests: [
+                %{
+                  tool_call_id: "call_sa",
+                  tool_name: "ask_user",
+                  arguments: %{"question" => "OK?"}
+                }
+              ],
+              review_configs: %{"ask_user" => %{allowed_decisions: [:approve]}},
+              hitl_tool_call_ids: ["call_sa"]
+            }
+          }
+        })
+
+      result2 = Agent.resume(agent, state_empty_tool_calls, [%{type: :approve}])
+      assert {:error, "No tool calls found in state"} = result2
+    end
+
+    test "resume returns error when agent has no HITL middleware configured" do
+      # An agent created without any HITL middleware should return a clear error
+      # when attempting to resume, because resume/4 requires HumanInTheLoop middleware.
+
+      subagent_task_tool =
+        LangChain.Function.new!(%{
+          name: "task",
+          description: "Delegate task to sub-agent",
+          function: fn _args, _context -> {:ok, "done"} end
+        })
+
+      # Agent with NO middleware at all (replace_default_middleware: true, empty list)
+      {:ok, agent_no_middleware} =
+        Agent.new(
+          %{
+            model: mock_model(),
+            tools: [subagent_task_tool],
+            middleware: []
+          },
+          replace_default_middleware: true
+        )
+
+      tool_call =
+        LangChain.Message.ToolCall.new!(%{
+          call_id: "tc_no_hitl",
+          name: "task",
+          arguments: %{"instructions" => "do work", "subagent_type" => "modeling"}
+        })
+
+      interrupted_state =
+        State.new!(%{
+          messages: [
+            Message.new_user!("Do the work"),
+            Message.new_assistant!(%{tool_calls: [tool_call]})
+          ],
+          interrupt_data: %{
+            type: :subagent_hitl,
+            sub_agent_id: "sub-no-hitl",
+            subagent_type: "modeling",
+            interrupt_data: %{
+              action_requests: [
+                %{
+                  tool_call_id: "call_sa",
+                  tool_name: "ask_user",
+                  arguments: %{"question" => "OK?"}
+                }
+              ],
+              review_configs: %{"ask_user" => %{allowed_decisions: [:approve]}},
+              hitl_tool_call_ids: ["call_sa"]
+            }
+          }
+        })
+
+      result = Agent.resume(agent_no_middleware, interrupted_state, [%{type: :approve}])
+      assert {:error, "Agent does not have HumanInTheLoop middleware configured"} = result
+
+      # Also test with an agent that has OTHER middleware but not HumanInTheLoop
+      {:ok, agent_other_middleware} =
+        Agent.new(
+          %{
+            model: mock_model(),
+            tools: [subagent_task_tool],
+            middleware: [TestMiddleware1]
+          },
+          replace_default_middleware: true
+        )
+
+      result2 = Agent.resume(agent_other_middleware, interrupted_state, [%{type: :approve}])
+      assert {:error, "Agent does not have HumanInTheLoop middleware configured"} = result2
+    end
+
+    test "resume with nested sub-sub-agent HITL (3-level nesting) routes decisions to level-1 sub-agent" do
+      # This test verifies correct behavior when there are 3 levels of nesting:
+      #   Parent agent -> Sub-agent (level 1, "researcher") -> Sub-sub-agent (level 2, "analyzer")
+      #
+      # The innermost sub-sub-agent triggers an HITL interrupt (ask_user). The
+      # interrupt_data propagates up through two levels, producing a doubly-nested
+      # structure:
+      #
+      #   %{type: :subagent_hitl,              # outer (level 1)
+      #     sub_agent_id: "sub-level1",
+      #     subagent_type: "researcher",
+      #     interrupt_data: %{
+      #       type: :subagent_hitl,             # inner (level 2)
+      #       sub_agent_id: "sub-level2",
+      #       subagent_type: "analyzer",
+      #       interrupt_data: %{                # actual HITL from level 2
+      #         action_requests: [...],
+      #         ...
+      #       }
+      #     }}
+      #
+      # When the parent resumes, execute_subagent_hitl_resume should:
+      # 1. Detect type: :subagent_hitl at the top level
+      # 2. Build resume_info from the TOP-LEVEL fields (sub_agent_id: "sub-level1")
+      # 3. Auto-approve all parent tool calls
+      # 4. Pass resume_info (with decisions) to the task tool via context
+      # 5. The level-1 sub-agent is then responsible for routing further to level 2
+
+      call_log = :ets.new(:nested_subagent_log, [:set, :public])
+
+      subagent_task_tool =
+        LangChain.Function.new!(%{
+          name: "task",
+          description: "Delegate task to sub-agent",
+          function: fn _args, context ->
+            # Capture the resume_info injected into context by the parent
+            resume_info = Map.get(context, :resume_info)
+            :ets.insert(call_log, {:resume_info, resume_info})
+            {:ok, "Sub-agent (level 1) resumed and completed successfully."}
+          end
+        })
+
+      {:ok, agent} =
+        Agent.new(
+          %{
+            model: mock_model(),
+            tools: [subagent_task_tool],
+            middleware: [
+              {Sagents.Middleware.HumanInTheLoop, [interrupt_on: %{}]}
+            ]
+          },
+          replace_default_middleware: true
+        )
+
+      tool_call =
+        LangChain.Message.ToolCall.new!(%{
+          call_id: "tc_nested",
+          name: "task",
+          arguments: %{"instructions" => "research and analyze", "subagent_type" => "researcher"}
+        })
+
+      # Build doubly-nested interrupt_data simulating 3-level propagation.
+      # Level 2 (innermost) triggered ask_user, which propagated up through
+      # level 1 to the parent. Each level wraps the child's interrupt_data
+      # in a :subagent_hitl envelope.
+      interrupted_state =
+        State.new!(%{
+          messages: [
+            Message.new_user!("Research and analyze this topic"),
+            Message.new_assistant!(%{tool_calls: [tool_call]})
+          ],
+          interrupt_data: %{
+            type: :subagent_hitl,
+            sub_agent_id: "sub-level1",
+            subagent_type: "researcher",
+            interrupt_data: %{
+              type: :subagent_hitl,
+              sub_agent_id: "sub-level2",
+              subagent_type: "analyzer",
+              interrupt_data: %{
+                action_requests: [
+                  %{
+                    tool_call_id: "call_inner",
+                    tool_name: "ask_user",
+                    arguments: %{"question" => "Should I proceed with deep analysis?"}
+                  }
+                ],
+                review_configs: %{"ask_user" => %{allowed_decisions: [:approve]}},
+                hitl_tool_call_ids: ["call_inner"]
+              }
+            }
+          }
+        })
+
+      stub(ChatAnthropic, :call, fn _model, _messages, _tools ->
+        {:ok, [Message.new_assistant!("Great, the nested sub-agent finished.")]}
+      end)
+
+      decisions = [%{type: :approve}]
+
+      # Parent resumes. Because interrupt_data.type == :subagent_hitl, the parent
+      # skips process_decisions (no parent-level HITL validation) and delegates
+      # to execute_subagent_hitl_resume.
+      result = Agent.resume(agent, interrupted_state, decisions)
+
+      # Resume should succeed — the parent auto-approves its own tool calls
+      # and the task tool completes after receiving resume_info.
+      assert {:ok, _final_state} = result
+
+      # Verify the task tool received resume_info in its context
+      [{:resume_info, resume_info}] = :ets.lookup(call_log, :resume_info)
+
+      # resume_info should reference the TOP-LEVEL sub-agent (level 1),
+      # NOT the innermost sub-sub-agent (level 2). The level-1 sub-agent
+      # is responsible for peeling off its layer and routing to level 2.
+      assert resume_info.sub_agent_id == "sub-level1"
+      assert resume_info.subagent_type == "researcher"
+
+      # The full decisions list is passed through so the level-1 sub-agent
+      # can forward them to level 2.
+      assert resume_info.decisions == decisions
+
+      :ets.delete(call_log)
+    end
+
+    test "parent passes decisions through unvalidated for subagent_hitl, sub-agent validates" do
+      # This test verifies the decision validation boundary:
+      # 1. The parent does NOT validate decisions for subagent_hitl — even empty
+      #    lists or unusual decision types pass through without error.
+      # 2. The parent delegates validation responsibility to the sub-agent by
+      #    forwarding decisions unmodified via resume_info in the tool context.
+
+      # --- Scenario 1: empty decisions list [] ---
+      call_log_empty = :ets.new(:validation_log_empty, [:set, :public])
+
+      task_tool_empty =
+        LangChain.Function.new!(%{
+          name: "task",
+          description: "Delegate task to sub-agent",
+          function: fn _args, context ->
+            resume_info = Map.get(context, :resume_info)
+            :ets.insert(call_log_empty, {:resume_info, resume_info})
+            {:ok, "Sub-agent completed."}
+          end
+        })
+
+      {:ok, agent_empty} =
+        Agent.new(
+          %{
+            model: mock_model(),
+            tools: [task_tool_empty],
+            middleware: [
+              {Sagents.Middleware.HumanInTheLoop, [interrupt_on: %{}]}
+            ]
+          },
+          replace_default_middleware: true
+        )
+
+      tool_call =
+        LangChain.Message.ToolCall.new!(%{
+          call_id: "tc_val_1",
+          name: "task",
+          arguments: %{"instructions" => "validate work", "subagent_type" => "validator"}
+        })
+
+      interrupted_state =
+        State.new!(%{
+          messages: [
+            Message.new_user!("Validate something"),
+            Message.new_assistant!(%{tool_calls: [tool_call]})
+          ],
+          interrupt_data: %{
+            type: :subagent_hitl,
+            sub_agent_id: "sub-val-1",
+            subagent_type: "validator",
+            interrupt_data: %{
+              action_requests: [
+                %{
+                  tool_call_id: "call_sa_v",
+                  tool_name: "ask_user",
+                  arguments: %{"question" => "Approve?"}
+                }
+              ],
+              review_configs: %{"ask_user" => %{allowed_decisions: [:approve, :reject]}},
+              hitl_tool_call_ids: ["call_sa_v"]
+            }
+          }
+        })
+
+      stub(ChatAnthropic, :call, fn _model, _messages, _tools ->
+        {:ok, [Message.new_assistant!("Completed.")]}
+      end)
+
+      # Pass an empty decisions list — parent should NOT reject this.
+      # In a normal (non-subagent) HITL resume, empty decisions would fail
+      # process_decisions validation. But for subagent_hitl, the parent skips
+      # process_decisions entirely and auto-approves its own tool calls.
+      result_empty = Agent.resume(agent_empty, interrupted_state, [])
+      assert {:ok, _final_state} = result_empty
+
+      # Verify the task tool received exactly the empty list in resume_info
+      [{:resume_info, resume_info_empty}] = :ets.lookup(call_log_empty, :resume_info)
+      assert resume_info_empty.sub_agent_id == "sub-val-1"
+      assert resume_info_empty.subagent_type == "validator"
+      assert resume_info_empty.decisions == []
+
+      :ets.delete(call_log_empty)
+
+      # --- Scenario 2: decisions with unusual/custom types ---
+      call_log_custom = :ets.new(:validation_log_custom, [:set, :public])
+
+      task_tool_custom =
+        LangChain.Function.new!(%{
+          name: "task",
+          description: "Delegate task to sub-agent",
+          function: fn _args, context ->
+            resume_info = Map.get(context, :resume_info)
+            :ets.insert(call_log_custom, {:resume_info, resume_info})
+            {:ok, "Sub-agent completed."}
+          end
+        })
+
+      {:ok, agent_custom} =
+        Agent.new(
+          %{
+            model: mock_model(),
+            tools: [task_tool_custom],
+            middleware: [
+              {Sagents.Middleware.HumanInTheLoop, [interrupt_on: %{}]}
+            ]
+          },
+          replace_default_middleware: true
+        )
+
+      stub(ChatAnthropic, :call, fn _model, _messages, _tools ->
+        {:ok, [Message.new_assistant!("Completed.")]}
+      end)
+
+      # Pass decisions with unusual types that the parent doesn't understand.
+      # A normal HITL resume might reject these, but subagent_hitl skips
+      # parent-level validation entirely.
+      custom_decisions = [
+        %{type: :custom_action, payload: "some_data"},
+        %{type: :escalate, reason: "needs manager approval"}
+      ]
+
+      result_custom = Agent.resume(agent_custom, interrupted_state, custom_decisions)
+      assert {:ok, _final_state} = result_custom
+
+      # Verify the task tool received the exact custom decisions unmodified
+      [{:resume_info, resume_info_custom}] = :ets.lookup(call_log_custom, :resume_info)
+      assert resume_info_custom.sub_agent_id == "sub-val-1"
+      assert resume_info_custom.subagent_type == "validator"
+      assert resume_info_custom.decisions == custom_decisions
+
+      # Confirm the decisions were not altered — each decision retains
+      # its original keys and values
+      [first_decision, second_decision] = resume_info_custom.decisions
+      assert first_decision.type == :custom_action
+      assert first_decision.payload == "some_data"
+      assert second_decision.type == :escalate
+      assert second_decision.reason == "needs manager approval"
+
+      :ets.delete(call_log_custom)
+    end
   end
 end
