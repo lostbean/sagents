@@ -544,76 +544,75 @@ defmodule Sagents.Agent do
     end
   end
 
-  # Resume from a sub-agent HITL interrupt.
-  # Injects resume_info into the chain's custom_context so the task tool
-  # can route to resume_subagent instead of start_subagent.
-  defp execute_subagent_hitl_resume(agent, state, decisions, opts, callbacks, interrupt_data) do
-    # Clear interrupt_data from state before building chain so it doesn't
-    # get re-detected by check_for_subagent_interrupt after tool execution
-    state_for_chain = %{state | interrupt_data: nil}
+  # Resume from a sub-agent HITL interrupt using direct injection.
+  #
+  # Instead of rebuilding a chain and re-executing all parent tool calls,
+  # this function:
+  # 1. Calls SubAgentServer.resume directly
+  # 2. Builds a synthetic tool result message
+  # 3. Replaces (not appends) the tool result in state.messages
+  # 4. Continues execution or returns a new interrupt
+  #
+  # This eliminates duplicate tool_result accumulation, stale state delta
+  # re-processing, and unnecessary sibling tool re-execution.
+  defp execute_subagent_hitl_resume(agent, state, decisions, opts, _callbacks, interrupt_data) do
+    sub_agent_id = interrupt_data.sub_agent_id
+    subagent_type = interrupt_data.subagent_type
 
-    with {:ok, langchain_messages} <- validate_messages(state.messages),
-         {:ok, chain} <- build_chain(agent, langchain_messages, state_for_chain, callbacks) do
-      # Inject resume_info so the task tool's function can detect resume context
-      resume_info = %{
-        sub_agent_id: interrupt_data.sub_agent_id,
-        subagent_type: interrupt_data.subagent_type,
-        decisions: decisions
-      }
+    case find_task_tool_call_id(state.messages) do
+      {:error, reason} ->
+        {:error, reason}
 
-      chain = LLMChain.update_custom_context(chain, %{resume_info: resume_info})
-
-      # Get the assistant message with tool calls
-      assistant_msg =
-        Enum.reverse(state.messages)
-        |> Enum.find(fn msg ->
-          msg.role == :assistant && msg.tool_calls != nil && msg.tool_calls != []
-        end)
-
-      case assistant_msg do
-        nil ->
-          {:error, "No tool calls found in state"}
-
-        %{tool_calls: all_tool_calls} ->
-          # Auto-approve ALL parent tool calls — the task tool handles resume internally
-          full_decisions = Enum.map(all_tool_calls, fn _tc -> %{type: :approve} end)
-
-          updated_chain =
-            LLMChain.execute_tool_calls_with_decisions(chain, all_tool_calls, full_decisions)
-
-          # Update state from tool results (this merges any State deltas)
-          updated_chain_with_state = update_chain_state_from_tools(updated_chain)
-
-          # Check if the sub-agent produced another interrupt during resume
-          case check_for_subagent_interrupt(updated_chain_with_state) do
-            {:interrupt, chain_with_cleared, new_interrupt_data} ->
-              case extract_state_from_chain(chain_with_cleared, state) do
-                {:ok, interrupted_state} ->
-                  {:interrupt, %{interrupted_state | interrupt_data: new_interrupt_data},
-                   new_interrupt_data}
-
-                {:error, reason} ->
-                  {:error, reason}
-              end
-
-            :continue ->
-              # Sub-agent completed — continue normal execution
-              tool_result_message = List.last(updated_chain_with_state.exchanged_messages)
-
-              # Clear interrupt_data from tool result's processed_content so it
-              # doesn't get re-merged in extract_state_from_chain during the
-              # subsequent execute() call
-              cleaned_message = clear_interrupt_from_tool_results(tool_result_message)
-
-              # Clear interrupt_data before continuing
-              state_with_results =
-                state
-                |> State.add_message(cleaned_message)
-                |> Map.put(:interrupt_data, nil)
-
-              execute(agent, state_with_results, opts)
+      {:ok, task_tool_call_id} ->
+        resume_result =
+          try do
+            Sagents.SubAgentServer.resume(sub_agent_id, decisions)
+          catch
+            :exit, reason ->
+              {:error, "SubAgent process unavailable: #{inspect(reason)}"}
           end
-      end
+
+        case resume_result do
+          {:ok, final_result} ->
+            # Sub-agent completed. Build synthetic tool result and replace.
+            synthetic_msg =
+              build_synthetic_tool_result(task_tool_call_id, final_result)
+
+            updated_messages =
+              replace_tool_result_in_messages(state.messages, task_tool_call_id, synthetic_msg)
+
+            clean_state = %{state | messages: updated_messages, interrupt_data: nil}
+            execute(agent, clean_state, opts)
+
+          {:interrupt, raw_interrupt_data} ->
+            # Sub-agent hit another interrupt. Enhance with parent context.
+            enhanced_interrupt = %{
+              type: :subagent_hitl,
+              sub_agent_id: sub_agent_id,
+              subagent_type: subagent_type,
+              interrupt_data: raw_interrupt_data
+            }
+
+            synthetic_msg =
+              build_synthetic_tool_result(
+                task_tool_call_id,
+                "SubAgent paused — awaiting user input."
+              )
+
+            updated_messages =
+              replace_tool_result_in_messages(state.messages, task_tool_call_id, synthetic_msg)
+
+            interrupted_state = %{
+              state
+              | messages: updated_messages,
+                interrupt_data: enhanced_interrupt
+            }
+
+            {:interrupt, interrupted_state, enhanced_interrupt}
+
+          {:error, reason} ->
+            {:error, "Sub-agent resume failed: #{inspect(reason)}"}
+        end
     end
   end
 
@@ -1023,27 +1022,6 @@ defmodule Sagents.Agent do
     |> Enum.reverse()
   end
 
-  # Clear interrupt_data from a tool result message's processed_content.
-  # This prevents the interrupt State delta from being re-merged when the
-  # message is processed by extract_state_from_chain in a subsequent execute() call.
-  @doc false
-  def clear_interrupt_from_tool_results(%LangChain.Message{tool_results: nil} = msg), do: msg
-
-  def clear_interrupt_from_tool_results(%LangChain.Message{tool_results: results} = msg) do
-    cleaned_results =
-      Enum.map(results, fn result ->
-        case result.processed_content do
-          %State{interrupt_data: interrupt_data} when not is_nil(interrupt_data) ->
-            %{result | processed_content: %{result.processed_content | interrupt_data: nil}}
-
-          _ ->
-            result
-        end
-      end)
-
-    %{msg | tool_results: cleaned_results}
-  end
-
   # Sub-agent HITL interrupt detection
   #
   # After tool execution, check if a sub-agent propagated an interrupt via
@@ -1069,6 +1047,73 @@ defmodule Sagents.Agent do
 
       _ ->
         :continue
+    end
+  end
+
+  # Find the tool_call_id for the "task" tool in the most recent assistant message.
+  defp find_task_tool_call_id(messages) do
+    assistant_msg =
+      messages
+      |> Enum.reverse()
+      |> Enum.find(fn msg ->
+        msg.role == :assistant && msg.tool_calls != nil && msg.tool_calls != []
+      end)
+
+    case assistant_msg do
+      nil ->
+        {:error, "No assistant message with tool calls found"}
+
+      %{tool_calls: tool_calls} ->
+        task_tc = Enum.find(tool_calls, fn tc -> tc.name == "task" end)
+
+        case task_tc do
+          nil -> {:error, "No 'task' tool call found in assistant message"}
+          %{call_id: call_id} -> {:ok, call_id}
+        end
+    end
+  end
+
+  # Build a synthetic tool result message for the sub-agent.
+  @doc false
+  def build_synthetic_tool_result(tool_call_id, content) do
+    tool_result =
+      LangChain.Message.ToolResult.new!(%{
+        tool_call_id: tool_call_id,
+        name: "task",
+        content: content
+      })
+
+    LangChain.Message.new_tool_result!(%{tool_results: [tool_result]})
+  end
+
+  # Replace or insert a tool result for a specific tool_call_id in the message list.
+  @doc false
+  def replace_tool_result_in_messages(messages, tool_call_id, new_tool_result_msg) do
+    new_result = hd(new_tool_result_msg.tool_results)
+
+    # Find existing tool message containing this tool_call_id
+    index =
+      Enum.find_index(messages, fn msg ->
+        msg.role == :tool &&
+          Enum.any?(msg.tool_results || [], fn tr -> tr.tool_call_id == tool_call_id end)
+      end)
+
+    case index do
+      nil ->
+        # No existing result -- append the new tool result message
+        messages ++ [new_tool_result_msg]
+
+      idx ->
+        # Replace the specific ToolResult within this tool message
+        existing_msg = Enum.at(messages, idx)
+
+        updated_results =
+          Enum.map(existing_msg.tool_results, fn tr ->
+            if tr.tool_call_id == tool_call_id, do: new_result, else: tr
+          end)
+
+        updated_msg = %{existing_msg | tool_results: updated_results}
+        List.replace_at(messages, idx, updated_msg)
     end
   end
 

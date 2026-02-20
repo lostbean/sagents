@@ -1449,48 +1449,8 @@ defmodule Sagents.Middleware.SubAgentTest do
       assert interrupt_data.interrupt_data.action_requests != nil
     end
 
-    test "resume_subagent returns valid 3-tuple when sub-agent interrupts again", %{
-      task_tool: task_tool,
-      context: context,
-      agent_id: _agent_id
-    } do
-      # Mock resume to return another interrupt
-      Sagents.SubAgentServer
-      |> Mimic.stub(:resume, fn _sub_agent_id, _decisions ->
-        {:interrupt,
-         %{
-           action_requests: [
-             %{
-               tool_call_id: "call_2",
-               tool_name: "write_file",
-               arguments: %{"path" => "out.txt"}
-             }
-           ],
-           review_configs: %{"write_file" => %{allowed_decisions: [:approve, :reject]}},
-           hitl_tool_call_ids: ["call_2"]
-         }}
-      end)
-
-      # Simulate a resume context — the tool function checks context.resume_info
-      resume_context =
-        Map.put(context, :resume_info, %{
-          sub_agent_id: "test-sub-agent-id",
-          subagent_type: "hitl_agent",
-          decisions: [%{type: :approve}]
-        })
-
-      args = %{
-        "instructions" => "Continue task",
-        "subagent_type" => "hitl_agent"
-      }
-
-      # The tool function dispatches to resume_subagent when resume_info present
-      # After the fix, resume should also return a valid 3-tuple
-      result = task_tool.function.(args, resume_context)
-
-      assert {:ok, message, %State{interrupt_data: interrupt_data}} = result
-      assert is_binary(message)
-      assert interrupt_data.type == :subagent_hitl
-    end
+    # NOTE: The resume_subagent test was removed because the direct injection
+    # refactor in agent.ex now calls SubAgentServer.resume directly, bypassing
+    # the tool function entirely. Resume no longer flows through execute_task/3.
   end
 end

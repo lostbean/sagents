@@ -830,19 +830,18 @@ defmodule Sagents.SubagentHitlIntegrationTest do
     test "Agent.resume skips process_decisions for subagent_hitl and injects resume_info" do
       # This test verifies the critical bypass in Agent.resume/4:
       # When interrupt_data.type == :subagent_hitl, it skips process_decisions
-      # (which would fail for empty interrupt_on) and goes directly to
-      # execute_approved_tools_and_update_state, injecting resume_info.
+      # (which would fail for empty interrupt_on) and calls
+      # SubAgentServer.resume directly with the correct sub_agent_id and decisions.
 
-      call_log = :ets.new(:bypass_log, [:set, :public])
-
+      # The task tool still needs to exist (for message structure) but its
+      # function won't be called during resume — SubAgentServer.resume is
+      # called directly instead.
       task_tool =
         LangChain.Function.new!(%{
           name: "task",
           description: "Delegate task to sub-agent",
-          function: fn _args, context ->
-            resume_info = Map.get(context, :resume_info)
-            :ets.insert(call_log, {:resume_info, resume_info})
-            {:ok, "Sub-agent completed after resume."}
+          function: fn _args, _context ->
+            {:ok, "Sub-agent completed."}
           end
         })
 
@@ -891,12 +890,19 @@ defmodule Sagents.SubagentHitlIntegrationTest do
           }
         })
 
+      decisions = [%{type: :approve}]
+
+      # Mock SubAgentServer.resume to verify correct args and return success
+      expect(Sagents.SubAgentServer, :resume, fn sub_agent_id, received_decisions ->
+        assert sub_agent_id == "sub-bypass-1"
+        assert received_decisions == decisions
+        {:ok, "completed"}
+      end)
+
       # Mock LLM for the continuation after resume
       stub(ChatAnthropic, :call, fn _model, _messages, _tools ->
         {:ok, [Message.new_assistant!("Great, the sub-agent finished.")]}
       end)
-
-      decisions = [%{type: :approve}]
 
       # Call Agent.resume directly (not through AgentServer)
       result = Agent.resume(agent, interrupted_state, decisions)
@@ -904,14 +910,6 @@ defmodule Sagents.SubagentHitlIntegrationTest do
       # Should succeed (the bypass means process_decisions is skipped)
       assert {:ok, final_state} = result
       assert final_state.interrupt_data == nil
-
-      # Verify the task tool received resume_info
-      [{:resume_info, resume_info}] = :ets.lookup(call_log, :resume_info)
-      assert resume_info.sub_agent_id == "sub-bypass-1"
-      assert resume_info.subagent_type == "researcher"
-      assert resume_info.decisions == decisions
-
-      :ets.delete(call_log)
     end
 
     test "Agent.resume with subagent_hitl through AgentServer exercises full bypass path" do
@@ -920,15 +918,14 @@ defmodule Sagents.SubagentHitlIntegrationTest do
       # We mock Agent.execute (for the initial interrupt) but let Agent.resume
       # run real code.
 
-      call_log = :ets.new(:full_bypass_log, [:set, :public])
-
+      # The task tool still needs to exist (for message structure) but its
+      # function won't be called during resume — SubAgentServer.resume is
+      # called directly instead.
       task_tool =
         LangChain.Function.new!(%{
           name: "task",
           description: "Delegate task",
-          function: fn _args, context ->
-            resume_info = Map.get(context, :resume_info)
-            :ets.insert(call_log, {:resume_info, resume_info})
+          function: fn _args, _context ->
             {:ok, "Sub-agent completed."}
           end
         })
@@ -991,6 +988,12 @@ defmodule Sagents.SubagentHitlIntegrationTest do
       # DO NOT mock Agent.resume - let it run real code!
       # This exercises the subagent_hitl bypass in Agent.resume/4
 
+      # Mock SubAgentServer.resume to return success (stub because AgentServer
+      # timing may be complex)
+      stub(Sagents.SubAgentServer, :resume, fn _sub_agent_id, _decisions ->
+        {:ok, "completed"}
+      end)
+
       # Mock LLM for the continuation after resume
       stub(ChatAnthropic, :call, fn _model, _messages, _tools ->
         {:ok, [Message.new_assistant!("All done.")]}
@@ -1020,17 +1023,9 @@ defmodule Sagents.SubagentHitlIntegrationTest do
       :ok = AgentServer.resume(agent_id, [%{type: :approve}])
       {:ok, :idle} = wait_for_status(agent_id, :idle)
 
-      # Verify the task tool received resume_info (proving the bypass worked)
-      [{:resume_info, resume_info}] = :ets.lookup(call_log, :resume_info)
-      assert resume_info.sub_agent_id == "sub-full-1"
-      assert resume_info.subagent_type == "researcher"
-      assert resume_info.decisions == [%{type: :approve}]
-
       # Verify final state
       final_state = AgentServer.get_state(agent_id)
       assert final_state.interrupt_data == nil
-
-      :ets.delete(call_log)
     end
   end
 end
