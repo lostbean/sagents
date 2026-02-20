@@ -1145,7 +1145,8 @@ defmodule Sagents.Agent do
   # Update the chain's custom_context.state with state deltas from recently executed tools.
   # This is critical for tools like TodoList that use merge operations - they need to see
   # the updated state from previous tool calls in the same execution loop.
-  defp update_chain_state_from_tools(chain) do
+  @doc false
+  def update_chain_state_from_tools(chain) do
     # Get the current state from custom_context
     current_state =
       case chain.custom_context do
@@ -1174,7 +1175,8 @@ defmodule Sagents.Agent do
   # Extract state deltas (State structs) from the most recent tool results in the chain.
   # Only looks at tool messages since the last assistant message to avoid re-processing
   # old tool results.
-  defp extract_state_deltas_from_chain(chain) do
+  @doc false
+  def extract_state_deltas_from_chain(chain) do
     # Get messages in reverse order and take only the most recent tool results
     # (since the last assistant message that made tool calls)
     chain.messages
@@ -1197,14 +1199,18 @@ defmodule Sagents.Agent do
           |> Enum.map(& &1.processed_content)
       end
     end)
+    # Reverse to chronological order so newest delta is processed last in
+    # the reduce, ensuring State.merge_states/2 gives it right-side priority.
+    |> Enum.reverse()
   end
 
   # Clear interrupt_data from a tool result message's processed_content.
   # This prevents the interrupt State delta from being re-merged when the
   # message is processed by extract_state_from_chain in a subsequent execute() call.
-  defp clear_interrupt_from_tool_results(%LangChain.Message{tool_results: nil} = msg), do: msg
+  @doc false
+  def clear_interrupt_from_tool_results(%LangChain.Message{tool_results: nil} = msg), do: msg
 
-  defp clear_interrupt_from_tool_results(%LangChain.Message{tool_results: results} = msg) do
+  def clear_interrupt_from_tool_results(%LangChain.Message{tool_results: results} = msg) do
     cleaned_results =
       Enum.map(results, fn result ->
         case result.processed_content do
