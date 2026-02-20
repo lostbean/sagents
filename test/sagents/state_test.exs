@@ -109,13 +109,13 @@ defmodule Sagents.StateTest do
       assert merged.interrupt_data == %{tool: "right"}
     end
 
-    test "left interrupt_data preserved when right is nil" do
+    test "right nil interrupt_data clears left (right-biased semantics)" do
       left = State.new!(%{interrupt_data: %{tool: "left"}})
       right = State.new!()
 
       merged = State.merge_states(left, right)
 
-      assert merged.interrupt_data == %{tool: "left"}
+      assert merged.interrupt_data == nil
     end
 
     test "right interrupt_data used when left is nil" do

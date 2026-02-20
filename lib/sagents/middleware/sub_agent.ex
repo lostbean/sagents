@@ -297,28 +297,8 @@ defmodule Sagents.Middleware.SubAgent do
     instructions = Map.fetch!(args, "instructions")
     subagent_type = Map.fetch!(args, "subagent_type")
 
-    # Check if we're resuming an existing SubAgent
-    case get_resume_context(context) do
-      {:resume, sub_agent_id} ->
-        # Resume existing SubAgent with decisions
-        resume_subagent(sub_agent_id, context)
-
-      :new ->
-        # Start new SubAgent (pass full args for system_prompt support)
-        start_subagent(instructions, subagent_type, args, context, config)
-    end
-  end
-
-  defp get_resume_context(context) do
-    # Check if this is a resume operation
-    # The context will contain resume info from Agent.resume
-    case Map.get(context, :resume_info) do
-      %{sub_agent_id: sub_agent_id} ->
-        {:resume, sub_agent_id}
-
-      _ ->
-        :new
-    end
+    # Start new SubAgent (pass full args for system_prompt support)
+    start_subagent(instructions, subagent_type, args, context, config)
   end
 
   @doc """
@@ -350,8 +330,6 @@ defmodule Sagents.Middleware.SubAgent do
     - `:state` - Parent agent state
     - `:parent_middleware` - Parent middleware list (for general-purpose
       SubAgents)
-    - `:resume_info` - Resume information if continuing interrupted SubAgent
-
   - `config` - Middleware configuration map containing:
     - `:agent_map` - Map of subagent_type -> Agent struct
     - `:descriptions` - Map of subagent_type -> description string
@@ -669,41 +647,6 @@ defmodule Sagents.Middleware.SubAgent do
       {:error, reason} ->
         Logger.error("SubAgent #{sub_agent_id} failed: #{inspect(reason)}")
         {:error, "SubAgent execution failed: #{inspect(reason)}"}
-    end
-  end
-
-  ## Resuming Existing SubAgent
-
-  defp resume_subagent(sub_agent_id, context) do
-    Logger.debug("Resuming SubAgent: #{sub_agent_id}")
-
-    # Extract decisions from resume context
-    decisions = Map.get(context.resume_info, :decisions, [])
-    subagent_type = Map.get(context.resume_info, :subagent_type, "unknown")
-
-    case SubAgentServer.resume(sub_agent_id, decisions) do
-      {:ok, final_result} ->
-        # SubAgent completed after approval
-        Logger.debug("SubAgent #{sub_agent_id} completed after resume")
-        {:ok, final_result}
-
-      {:interrupt, interrupt_data} ->
-        # Another interrupt (e.g., SubAgent needs approval for another tool)
-        # Return as valid 3-tuple so LangChain can propagate it.
-        Logger.info("SubAgent '#{subagent_type}' interrupted again")
-
-        enhanced = %{
-          type: :subagent_hitl,
-          sub_agent_id: sub_agent_id,
-          subagent_type: subagent_type,
-          interrupt_data: interrupt_data
-        }
-
-        {:ok, "SubAgent paused — awaiting user input.", %Sagents.State{interrupt_data: enhanced}}
-
-      {:error, reason} ->
-        Logger.error("SubAgent #{sub_agent_id} resume failed: #{inspect(reason)}")
-        {:error, "SubAgent resume failed: #{inspect(reason)}"}
     end
   end
 end
