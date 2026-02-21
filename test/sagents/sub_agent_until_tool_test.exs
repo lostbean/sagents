@@ -48,6 +48,112 @@ defmodule Sagents.SubAgentUntilToolTest do
     )
   end
 
+  describe "execute/2 with struct-based until_tool (no opts)" do
+    test "uses until_tool_names from struct when no opts provided" do
+      submit_tool = make_tool("submit")
+
+      # Create subagent with until_tool set via new_from_config
+      agent_config = make_agent([submit_tool])
+
+      subagent =
+        SubAgent.new_from_config(
+          parent_agent_id: "test-parent",
+          instructions: "Do the thing",
+          agent_config: agent_config,
+          parent_state: %{messages: []},
+          until_tool: "submit"
+        )
+
+      assert subagent.until_tool_names == ["submit"]
+
+      stub(ChatAnthropic, :call, fn _model, _messages, _tools ->
+        tool_call =
+          ToolCall.new!(%{
+            call_id: "call_1",
+            name: "submit",
+            arguments: %{"data" => "result"},
+            status: :complete
+          })
+
+        {:ok, [Message.new_assistant!(%{tool_calls: [tool_call]})]}
+      end)
+
+      # Execute WITHOUT passing until_tool opt — should use struct fields
+      assert {:ok, %SubAgent{status: :completed}, %ToolResult{name: "submit"}} =
+               SubAgent.execute(subagent)
+    end
+
+    test "opts override struct-based until_tool" do
+      submit_tool = make_tool("submit")
+      other_tool = make_tool("other")
+
+      agent_config = make_agent([submit_tool, other_tool])
+
+      subagent =
+        SubAgent.new_from_config(
+          parent_agent_id: "test-parent",
+          instructions: "Do the thing",
+          agent_config: agent_config,
+          parent_state: %{messages: []},
+          until_tool: "submit"
+        )
+
+      assert subagent.until_tool_names == ["submit"]
+
+      stub(ChatAnthropic, :call, fn _model, _messages, _tools ->
+        tool_call =
+          ToolCall.new!(%{
+            call_id: "call_1",
+            name: "other",
+            arguments: %{},
+            status: :complete
+          })
+
+        {:ok, [Message.new_assistant!(%{tool_calls: [tool_call]})]}
+      end)
+
+      # Execute with different until_tool opt — should override struct
+      assert {:ok, %SubAgent{status: :completed}, %ToolResult{name: "other"}} =
+               SubAgent.execute(subagent, until_tool: "other")
+    end
+
+    test "struct-based max_runs is used when no opts provided" do
+      search_tool = make_tool("search")
+      submit_tool = make_tool("submit")
+
+      agent_config = make_agent([search_tool, submit_tool])
+
+      subagent =
+        SubAgent.new_from_config(
+          parent_agent_id: "test-parent",
+          instructions: "Do the thing",
+          agent_config: agent_config,
+          parent_state: %{messages: []},
+          until_tool: "submit",
+          until_tool_max_runs: 2
+        )
+
+      assert subagent.until_tool_max_runs == 2
+
+      # LLM always calls "search", never "submit"
+      stub(ChatAnthropic, :call, fn _model, _messages, _tools ->
+        tool_call =
+          ToolCall.new!(%{
+            call_id: "call_#{:erlang.unique_integer([:positive])}",
+            name: "search",
+            arguments: %{"q" => "more"},
+            status: :complete
+          })
+
+        {:ok, [Message.new_assistant!(%{tool_calls: [tool_call]})]}
+      end)
+
+      # Should hit struct's max_runs of 2
+      assert {:error, %SubAgent{status: :error} = error_subagent} = SubAgent.execute(subagent)
+      assert error_subagent.error =~ "max_runs (2) exceeded"
+    end
+  end
+
   describe "execute/2 with until_tool option" do
     test "returns 3-tuple when target tool is called" do
       submit_tool = make_tool("submit")
