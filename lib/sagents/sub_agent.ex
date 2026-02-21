@@ -186,6 +186,10 @@ defmodule Sagents.SubAgent do
     agent_config = Keyword.fetch!(opts, :agent_config)
     parent_state = Keyword.get(opts, :parent_state)
 
+    # Optional until_tool configuration
+    until_tool = Keyword.get(opts, :until_tool)
+    until_tool_max_runs = Keyword.get(opts, :until_tool_max_runs)
+
     # Generate unique ID
     sub_agent_id = "#{parent_agent_id}-sub-#{:erlang.unique_integer([:positive])}"
 
@@ -215,11 +219,16 @@ defmodule Sagents.SubAgent do
     # Extract interrupt_on configuration from agent_config middleware
     interrupt_on = extract_interrupt_on_from_middleware(agent_config.middleware)
 
+    # Normalize until_tool into a list of names (or nil)
+    normalized_until_tool = AgentUtils.normalize_until_tool(until_tool)
+
     %SubAgent{
       id: sub_agent_id,
       parent_agent_id: parent_agent_id,
       chain: chain,
       interrupt_on: interrupt_on,
+      until_tool_names: normalized_until_tool,
+      until_tool_max_runs: until_tool_max_runs || 25,
       status: :idle,
       created_at: DateTime.utc_now()
     }
@@ -256,6 +265,10 @@ defmodule Sagents.SubAgent do
     initial_messages = Keyword.get(opts, :initial_messages, [])
     parent_state = Keyword.get(opts, :parent_state)
 
+    # Optional until_tool configuration
+    until_tool = Keyword.get(opts, :until_tool)
+    until_tool_max_runs = Keyword.get(opts, :until_tool_max_runs)
+
     # Generate unique ID
     sub_agent_id = "#{parent_agent_id}-sub-#{:erlang.unique_integer([:positive])}"
 
@@ -287,11 +300,16 @@ defmodule Sagents.SubAgent do
     # Extract interrupt_on configuration from compiled_agent middleware
     interrupt_on = extract_interrupt_on_from_middleware(compiled_agent.middleware)
 
+    # Normalize until_tool into a list of names (or nil)
+    normalized_until_tool = AgentUtils.normalize_until_tool(until_tool)
+
     %SubAgent{
       id: sub_agent_id,
       parent_agent_id: parent_agent_id,
       chain: chain,
       interrupt_on: interrupt_on,
+      until_tool_names: normalized_until_tool,
+      until_tool_max_runs: until_tool_max_runs || 25,
       status: :idle,
       created_at: DateTime.utc_now()
     }
@@ -346,8 +364,16 @@ defmodule Sagents.SubAgent do
 
   def execute(%SubAgent{status: :idle, chain: chain, interrupt_on: interrupt_on} = subagent, opts) do
     callbacks = Keyword.get(opts, :callbacks, %{})
-    until_tool_names = AgentUtils.normalize_until_tool(Keyword.get(opts, :until_tool))
-    max_runs = Keyword.get(opts, :max_runs, 25)
+
+    # Use opts if provided, otherwise fall back to struct fields
+    until_tool_names =
+      case Keyword.fetch(opts, :until_tool) do
+        {:ok, value} -> AgentUtils.normalize_until_tool(value)
+        :error -> subagent.until_tool_names
+      end
+
+    max_runs =
+      Keyword.get(opts, :max_runs) || subagent.until_tool_max_runs || 25
 
     Logger.debug("SubAgent #{subagent.id} executing")
 
@@ -708,7 +734,10 @@ defmodule Sagents.SubAgent do
 
           :continue ->
             # No interrupt needed - execute tools automatically
-            chain_after_tools = LLMChain.execute_tool_calls(chain_after_llm)
+            chain_after_tools =
+              chain_after_llm
+              |> LLMChain.execute_tool_calls()
+              |> Sagents.Agent.update_chain_state_from_tools()
 
             # Check if chain needs more work (needs_response flag)
             # If needs_response is nil or true, continue; if false, we're done
@@ -752,7 +781,10 @@ defmodule Sagents.SubAgent do
               {:interrupt, chain_after_llm, interrupt_data}
 
             :continue ->
-              chain_after_tools = LLMChain.execute_tool_calls(chain_after_llm)
+              chain_after_tools =
+                chain_after_llm
+                |> LLMChain.execute_tool_calls()
+                |> Sagents.Agent.update_chain_state_from_tools()
 
               case AgentUtils.find_matching_tool_result(chain_after_tools, until_tool_names) do
                 {:found, tool_result} ->
@@ -802,6 +834,8 @@ defmodule Sagents.SubAgent do
       field :model, :any, virtual: true
       field :middleware, {:array, :any}, default: [], virtual: true
       field :interrupt_on, :map
+      field :until_tool, :any, virtual: true
+      field :until_tool_max_runs, :integer, virtual: true, default: 25
     end
 
     @type t :: %Config{
@@ -811,7 +845,9 @@ defmodule Sagents.SubAgent do
             tools: [LangChain.Function.t()],
             model: term() | nil,
             middleware: list(),
-            interrupt_on: map() | nil
+            interrupt_on: map() | nil,
+            until_tool: String.t() | [String.t()] | nil,
+            until_tool_max_runs: integer()
           }
 
     def new(attrs) do
@@ -823,7 +859,9 @@ defmodule Sagents.SubAgent do
         :tools,
         :model,
         :middleware,
-        :interrupt_on
+        :interrupt_on,
+        :until_tool,
+        :until_tool_max_runs
       ])
       |> validate_required([:name, :description, :system_prompt, :tools])
       |> validate_length(:name, min: 1, max: 100)
@@ -874,6 +912,8 @@ defmodule Sagents.SubAgent do
       field :agent, :any, virtual: true
       field :extract_result, :any, virtual: true
       field :initial_messages, {:array, :any}, default: [], virtual: true
+      field :until_tool, :any, virtual: true
+      field :until_tool_max_runs, :integer, virtual: true, default: 25
     end
 
     @type t :: %Compiled{
@@ -881,12 +921,22 @@ defmodule Sagents.SubAgent do
             description: String.t(),
             agent: Sagents.Agent.t(),
             extract_result: (State.t() -> any()) | nil,
-            initial_messages: [LangChain.Message.t()]
+            initial_messages: [LangChain.Message.t()],
+            until_tool: String.t() | [String.t()] | nil,
+            until_tool_max_runs: integer()
           }
 
     def new(attrs) do
       %Compiled{}
-      |> cast(attrs, [:name, :description, :agent, :extract_result, :initial_messages])
+      |> cast(attrs, [
+        :name,
+        :description,
+        :agent,
+        :extract_result,
+        :initial_messages,
+        :until_tool,
+        :until_tool_max_runs
+      ])
       |> validate_required([:name, :description, :agent])
       |> validate_length(:name, min: 1, max: 100)
       |> validate_length(:description, min: 1, max: 500)
