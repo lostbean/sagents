@@ -1465,4 +1465,157 @@ defmodule Sagents.Middleware.SubAgentTest do
     LLMChain |> stub(:run, fun)
     LLMChain |> stub(:run, fn chain, _opts -> fun.(chain) end)
   end
+
+  describe "until_tool configuration" do
+    test "init stores until_tool_map from subagent configs with until_tool" do
+      config_with_until =
+        SubAgent.Config.new!(%{
+          name: "finisher",
+          description: "Agent with until_tool",
+          system_prompt: "You are an agent that uses finish_tool",
+          tools: [test_tool("finish_tool")],
+          until_tool: "finish_tool"
+        })
+
+      config_without_until = build_subagent_config("plain", "Plain agent")
+
+      opts = [
+        agent_id: "parent",
+        model: test_model(),
+        middleware: [],
+        subagents: [config_with_until, config_without_until]
+      ]
+
+      assert {:ok, middleware_config} = SubAgentMiddleware.init(opts)
+      assert is_map(middleware_config.until_tool_map)
+      assert middleware_config.until_tool_map["finisher"] == "finish_tool"
+      refute Map.has_key?(middleware_config.until_tool_map, "plain")
+    end
+
+    test "init stores empty until_tool_map when no configs have until_tool" do
+      config = build_subagent_config("plain", "Plain agent")
+
+      opts = [
+        agent_id: "parent",
+        model: test_model(),
+        middleware: [],
+        subagents: [config]
+      ]
+
+      assert {:ok, middleware_config} = SubAgentMiddleware.init(opts)
+      assert middleware_config.until_tool_map == %{}
+    end
+
+    test "SubAgent created with until_tool from config" do
+      agent_id = "parent-until-#{System.unique_integer([:positive])}"
+
+      {:ok, _sup} =
+        start_supervised({
+          SubAgentsDynamicSupervisor,
+          agent_id: agent_id
+        })
+
+      config_with_until =
+        SubAgent.Config.new!(%{
+          name: "finisher",
+          description: "Agent with until_tool",
+          system_prompt: "You are an agent that uses finish_tool",
+          tools: [test_tool("finish_tool")],
+          until_tool: "finish_tool"
+        })
+
+      {:ok, middleware_config} =
+        SubAgentMiddleware.init(
+          agent_id: agent_id,
+          model: test_model(),
+          middleware: [],
+          subagents: [config_with_until]
+        )
+
+      # Mock LLMChain.run -- capture the chain to verify until_tool is set
+      assistant_message = Message.new_assistant!(%{content: "Done with until_tool"})
+
+      extra_data = %{tool_name: "finish_tool", tool_args: %{"result" => "42"}}
+
+      LLMChain
+      |> stub(:run, fn chain, opts ->
+        # Verify until_tool was passed through mode opts
+        assert Keyword.get(opts, :until_tool) == "finish_tool"
+
+        updated_chain =
+          chain
+          |> Map.put(:messages, chain.messages ++ [assistant_message])
+          |> Map.put(:last_message, assistant_message)
+          |> Map.put(:needs_response, false)
+
+        {:ok, updated_chain, extra_data}
+      end)
+
+      args = %{"instructions" => "Do the task", "subagent_type" => "finisher"}
+      context = %{state: State.new!(%{messages: []})}
+
+      assert {:ok, result, extra} =
+               SubAgentMiddleware.start_subagent(
+                 "Do the task",
+                 "finisher",
+                 args,
+                 context,
+                 middleware_config
+               )
+
+      assert result == "Done with until_tool"
+      assert extra == extra_data
+    end
+
+    test "execute_subagent passes through 3-tuple from SubAgentServer" do
+      agent_id = "parent-3tuple-#{System.unique_integer([:positive])}"
+
+      {:ok, _sup} =
+        start_supervised({
+          SubAgentsDynamicSupervisor,
+          agent_id: agent_id
+        })
+
+      config_with_until =
+        SubAgent.Config.new!(%{
+          name: "finisher",
+          description: "Agent with until_tool",
+          system_prompt: "You are an agent",
+          tools: [test_tool("finish_tool")],
+          until_tool: "finish_tool"
+        })
+
+      {:ok, middleware_config} =
+        SubAgentMiddleware.init(
+          agent_id: agent_id,
+          model: test_model(),
+          middleware: [],
+          subagents: [config_with_until]
+        )
+
+      [task_tool] = SubAgentMiddleware.tools(middleware_config)
+
+      # Mock LLMChain.run to return 3-tuple
+      assistant_message = Message.new_assistant!(%{content: "Finished!"})
+      extra_data = %{tool_name: "finish_tool", tool_args: %{"answer" => "yes"}}
+
+      LLMChain
+      |> stub(:run, fn chain, _opts ->
+        updated_chain =
+          chain
+          |> Map.put(:messages, chain.messages ++ [assistant_message])
+          |> Map.put(:last_message, assistant_message)
+          |> Map.put(:needs_response, false)
+
+        {:ok, updated_chain, extra_data}
+      end)
+
+      args = %{"instructions" => "Finish the task", "subagent_type" => "finisher"}
+      context = %{state: State.new!(%{messages: []})}
+
+      assert {:ok, result, extra} = task_tool.function.(args, context)
+      assert result == "Finished!"
+      assert extra == extra_data
+    end
+  end
 end
