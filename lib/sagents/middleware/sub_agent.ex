@@ -140,6 +140,7 @@ defmodule Sagents.Middleware.SubAgent do
 
   require Logger
 
+  alias Sagents.AgentContext
   alias Sagents.SubAgent
   alias Sagents.SubAgentServer
   alias Sagents.SubAgentsDynamicSupervisor
@@ -442,11 +443,17 @@ defmodule Sagents.Middleware.SubAgent do
         # Uses existing Sagents.Registry for process lookup
         supervisor_name = SubAgentsDynamicSupervisor.get_name(config.agent_id)
 
+        # Fork agent context for the child process, giving middleware a chance
+        # to inject process-local state (e.g., tracing context)
+        parent_middleware = Map.get(context, :parent_middleware, [])
+        child_context = AgentContext.fork_with_middleware(parent_middleware)
+
         # Spawn SubAgentServer under supervision
         # SubAgentServer will register itself in Sagents.Registry
         child_spec = %{
           id: subagent.id,
-          start: {SubAgentServer, :start_link, [[subagent: subagent]]},
+          start:
+            {SubAgentServer, :start_link, [[subagent: subagent, agent_context: child_context]]},
           # Don't restart on crash
           restart: :temporary
         }
@@ -519,12 +526,17 @@ defmodule Sagents.Middleware.SubAgent do
             agent_config: agent_config
           )
 
+        # Fork agent context for the child process, giving middleware a chance
+        # to inject process-local state (e.g., tracing context)
+        child_context = AgentContext.fork_with_middleware(parent_middleware)
+
         # Get supervisor and start SubAgent (same as pre-configured)
         supervisor_name = SubAgentsDynamicSupervisor.get_name(config.agent_id)
 
         child_spec = %{
           id: subagent.id,
-          start: {SubAgentServer, :start_link, [[subagent: subagent]]},
+          start:
+            {SubAgentServer, :start_link, [[subagent: subagent, agent_context: child_context]]},
           restart: :temporary
         }
 
