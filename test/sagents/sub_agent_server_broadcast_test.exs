@@ -415,58 +415,63 @@ defmodule Sagents.SubAgentServerBroadcastTest do
       # Create subagent - new_from_config extracts interrupt_on from middleware
       subagent = create_subagent(parent_agent.agent_id, agent: agent_with_hitl)
 
-      # Build a tool call that would have triggered HITL interrupt
+      # Build a tool call that triggers HITL interrupt
       tool_call =
         ToolCall.new!(%{
           call_id: "call_file_write_1",
           name: "file_write",
-          arguments: Jason.encode!(%{"path" => "test.txt", "content" => "hello world"})
+          arguments: %{"path" => "test.txt", "content" => "hello world"}
         })
 
-      # Add the assistant message with tool call to the chain
-      # This simulates the state after execute returned {:interrupt, ...}
-      tool_call_message = Message.new_assistant!(%{tool_calls: [tool_call]})
+      llm_call_count = :counters.new(1, [:atomics])
 
-      chain_with_tool_call =
-        LangChain.Chains.LLMChain.add_message(subagent.chain, tool_call_message)
+      # Mock ChatAnthropic.call: first call returns tool call (→ interrupt),
+      # second call returns final assistant response (→ complete)
+      ChatAnthropic
+      |> stub(:call, fn _model, _messages, _tools ->
+        count = :counters.get(llm_call_count, 1)
+        :counters.add(llm_call_count, 1, 1)
 
-      # Build the interrupt_data that would have been created
-      action_request = %{
-        tool_call_id: "call_file_write_1",
-        tool_name: "file_write",
-        arguments: %{"path" => "test.txt", "content" => "hello world"}
-      }
+        case count do
+          0 ->
+            {:ok, [Message.new_assistant!(%{tool_calls: [tool_call]})]}
 
-      # Create the interrupted subagent state
-      interrupted_subagent = %{
-        subagent
-        | status: :interrupted,
-          chain: chain_with_tool_call,
-          interrupt_data: %{
-            action_requests: [action_request],
-            hitl_tool_call_ids: ["call_file_write_1"]
-          }
-      }
+          _ ->
+            {:ok, [Message.new_assistant!("I've written the file test.txt successfully.")]}
+        end
+      end)
 
-      {:ok, _pid} = SubAgentServer.start_link(subagent: interrupted_subagent)
+      # Start SubAgentServer and go through full execute→interrupt→resume cycle
+      {:ok, _pid} = SubAgentServer.start_link(subagent: subagent)
 
       # Consume started event
       assert_receive {:agent, {:debug, {:subagent, _, {:subagent_started, _}}}}, 100
 
-      # Mock ChatAnthropic.call for the completion response after tool execution
-      ChatAnthropic
-      |> stub(:call, fn _model, _messages, _callbacks ->
-        {:ok, [Message.new_assistant!("I've written the file test.txt successfully.")]}
-      end)
+      # Execute → should interrupt on file_write tool call
+      assert {:interrupt, interrupt_data} = SubAgentServer.execute(subagent.id)
+      assert length(interrupt_data.action_requests) == 1
+
+      # Consume execute-phase broadcasts
+      assert_receive {:agent, {:debug, {:subagent, sub_id, {:subagent_status_changed, :running}}}}
+      assert sub_id == subagent.id
+
+      # Consume llm_message for the assistant tool call message from execute
+      assert_receive {:agent,
+                      {:debug,
+                       {:subagent, ^sub_id, {:subagent_llm_message, _execute_assistant_msg}}}}
+
+      # Consume interrupt status
+      assert_receive {:agent,
+                      {:debug, {:subagent, ^sub_id, {:subagent_status_changed, :interrupted}}}}
 
       # Resume with approval decision
       decisions = [%{type: :approve}]
-      {:ok, result} = SubAgentServer.resume(interrupted_subagent.id, decisions)
+      {:ok, result} = SubAgentServer.resume(subagent.id, decisions)
       assert result == "I've written the file test.txt successfully."
 
       # Should receive running status when resume starts
-      assert_receive {:agent, {:debug, {:subagent, sub_id, {:subagent_status_changed, :running}}}}
-      assert sub_id == interrupted_subagent.id
+      assert_receive {:agent,
+                      {:debug, {:subagent, ^sub_id, {:subagent_status_changed, :running}}}}
 
       # Should receive llm_message event for the tool result (from executing the approved tool)
       assert_receive {:agent,

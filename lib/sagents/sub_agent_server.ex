@@ -314,14 +314,8 @@ defmodule Sagents.SubAgentServer do
     # Broadcast status change to running (resuming)
     broadcast_subagent_event(server_state, {:subagent_status_changed, :running})
 
-    # Build PubSub callbacks and collect middleware callbacks
-    pubsub_callbacks = build_pubsub_callbacks(server_state)
-    middleware = get_subagent_middleware(server_state)
-    middleware_callbacks = Sagents.Middleware.collect_callbacks(middleware)
-    callbacks = [pubsub_callbacks | middleware_callbacks]
-
-    # Delegate to SubAgent.resume with callbacks
-    case SubAgent.resume(subagent, decisions, callbacks: callbacks) do
+    # Callbacks are already on the chain from execute — no need to rebuild
+    case SubAgent.resume(subagent, decisions) do
       {:ok, completed_subagent} ->
         Logger.debug("SubAgentServer #{subagent.id} completed after resume")
         handle_completed_subagent(server_state, completed_subagent, nil)

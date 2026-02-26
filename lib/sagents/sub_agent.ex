@@ -417,8 +417,8 @@ defmodule Sagents.SubAgent do
 
   - `subagent` - SubAgent with status :interrupted
   - `decisions` - List of decision maps from human reviewer
-  - `opts` - Optional keyword list with:
-    - `:callbacks` - Map of LLMChain callbacks (e.g., `%{on_message_processed: fn...}`)
+  - `opts` - Optional keyword list (reserved for future use; callbacks are
+    inherited from the chain set up during `execute/2`)
 
   ## Returns
 
@@ -453,9 +453,10 @@ defmodule Sagents.SubAgent do
           interrupt_data: interrupt_data
         } = subagent,
         decisions,
-        opts
+        _opts
       ) do
-    callbacks = Keyword.get(opts, :callbacks, %{})
+    # Note: callbacks opt is intentionally ignored. The chain already has
+    # callbacks from execute/2 and re-adding would cause duplicates.
     Logger.debug("SubAgent #{subagent.id} resuming with #{length(decisions)} decisions")
 
     # Update status to running
@@ -483,14 +484,13 @@ defmodule Sagents.SubAgent do
         action_requests
       )
 
-    # Add callbacks to chain once at entry point (not in the loop)
-    chain_with_callbacks = maybe_add_callbacks(chain, callbacks)
-
     # Use LLMChain to execute tool calls with decisions
     # This handles approve/edit/reject logic and creates tool result messages
+    # Note: callbacks are already on the chain from execute/2 — don't re-add
+    # them here or they accumulate with each resume cycle.
     chain_with_results =
       LLMChain.execute_tool_calls_with_decisions(
-        chain_with_callbacks,
+        chain,
         all_tool_calls,
         full_decisions
       )
