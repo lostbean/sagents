@@ -461,8 +461,17 @@ defmodule Sagents.Agent do
           apply_after_model_hooks(response_state, agent.middleware)
 
         {:interrupt, interrupted_state, interrupt_data} ->
-          # Interrupt from execute_model - return immediately without after_model hooks
-          {:interrupt, interrupted_state, interrupt_data}
+          # Apply after_model hooks to allow middleware cleanup (e.g., closing
+          # observability spans). The interrupt result takes priority — if
+          # after_model fails we still return the original interrupt.
+          state_after_hooks =
+            case apply_after_model_hooks(interrupted_state, agent.middleware) do
+              {:ok, s} -> s
+              {:interrupt, s, _} -> s
+              {:error, _} -> interrupted_state
+            end
+
+          {:interrupt, state_after_hooks, interrupt_data}
 
         {:error, reason} ->
           {:error, reason}
